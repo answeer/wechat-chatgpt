@@ -185,20 +185,149 @@ class ContractMetadataExtractor:
         finally:
             pythoncom.CoUninitialize()
 
-    def extract_files_from_archive(self,archive_path, extract_to):
+    def extract_files_from_archive(self, archive_path, extract_to):
+        """Extract files from archive and return list of extracted file paths"""
+        extracted_files = []
         try:
             if archive_path.endswith('.zip'):
                 with zipfile.ZipFile(archive_path, 'r') as zip_ref:
                     zip_ref.extractall(extract_to)
+                    extracted_files = [os.path.join(extract_to, f) for f in zip_ref.namelist()]
             elif archive_path.endswith('.7z'):
                 with py7zr.SevenZipFile(archive_path, mode='r') as z:
                     z.extractall(path=extract_to)
-            else:
-                return []
+                    extracted_files = [os.path.join(extract_to, f) for f in z.getnames()]
+            logger.info(f"Extracted {len(extracted_files)} files from {archive_path}")
+            return extracted_files
         except Exception as e:
-            print(f"Error extracting {archive_path}: {e}")
+            logger.error(f"Error extracting {archive_path}: {e}")
             return []
 
+    def process_archive_files(self, archive_path, contract_name, file_name):
+        """Process archive files and return results"""
+        archive_results = {}
+        
+        # Create unique extraction folder for this archive
+        extracted_folder = os.path.join("temp_extracted", contract_name, Path(file_name).stem)
+        os.makedirs(extracted_folder, exist_ok=True)
+        
+        # Extract files from archive
+        extracted_files = self.extract_files_from_archive(archive_path, extracted_folder)
+        
+        if not extracted_files:
+            archive_results[file_name] = "Failed to extract archive or archive is empty"
+            return archive_results
+        
+        # Process each extracted file
+        for extracted_file in extracted_files:
+            if os.path.isfile(extracted_file):
+                extracted_file_name = Path(extracted_file).name
+                logger.info(f"Processing extracted file: {extracted_file_name}")
+                
+                # Process the extracted file
+                file_result = self.process_single_file(extracted_file, contract_name)
+                archive_results[extracted_file_name] = file_result
+        
+        return archive_results
+
+    def process_single_file(self, file_path, contract_name):
+        """Process a single file and return result"""
+        file_name = Path(file_path).name
+        file_extension = Path(file_path).suffix.lower()
+        
+        output_filename = Path(file_name).stem + '.json'
+        output_folder = os.path.join("output", contract_name)
+        os.makedirs(output_folder, exist_ok=True)
+        output_path = os.path.join(output_folder, output_filename)
+
+        if os.path.exists(output_path):
+            logger.info(f"File processed already: {output_path}")
+            return "Processed Already!"
+
+        logger.info(f"Processing file: {file_name}")
+
+        # Create temp directory for conversions
+        os.makedirs("temp_conversions", exist_ok=True)
+        temp_pdf_path = os.path.join("temp_conversions", Path(file_name).stem + '.pdf')
+        
+        conversion_success = False
+        
+        if file_extension == '.pdf':
+            temp_pdf_path = file_path
+            conversion_success = True
+            
+        elif file_extension == '.docx':
+            try:
+                convert(file_path, temp_pdf_path)
+                conversion_success = True
+            except Exception as e:
+                logger.error(f"Failed to convert DOCX to PDF: {e}")
+                
+        elif file_extension in ['.xlsx', '.xls']:
+            conversion_success = self.convert_xlsx_to_pdf(file_path, temp_pdf_path)
+            
+        elif file_extension == '.csv':
+            conversion_success = self.convert_csv_to_pdf(file_path, temp_pdf_path)
+            
+        elif file_extension in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']:
+            conversion_success = self.convert_image_to_pdf(file_path, temp_pdf_path)
+            
+        elif file_extension == '.msg':
+            conversion_success = self.convert_msg_to_pdf(file_path, temp_pdf_path)
+            
+        elif file_extension in ['.7z', '.zip']:
+            # Handle nested archives recursively
+            archive_results = self.process_archive_files(file_path, contract_name, file_name)
+            return archive_results
+
+        else:
+            logger.warning(f"Unsupported file format: {file_name}")
+            return f"Unsupported format: {file_extension}"
+
+        if not conversion_success:
+            logger.error(f"Failed to convert {file_name} to PDF")
+            return "Conversion to PDF failed"
+
+        # Process the converted PDF
+        try:
+            page_count = self.get_pdf_page_count(temp_pdf_path)
+            logger.info(f"PDF page count: {page_count}")
+            
+            if page_count > 100:
+                logger.info(f"Document has {page_count} pages, converting to markdown...")
+                markdown_content = self.convert_pdf_to_markdown(temp_pdf_path)
+                
+                if markdown_content:
+                    prompt = self.build_prompt_with_markdown(contract_name, markdown_content, self.prompt_template)
+                else:
+                    logger.warning("Docling conversion failed, falling back to text extraction")
+                    text_content = self.extract_text_from_pdf(temp_pdf_path)
+                    prompt = self.build_prompt_with_text(contract_name, text_content, self.prompt_template)
+            else:
+                encoded_content = self.file_to_base64(temp_pdf_path)
+                prompt = self.build_prompt_with_pdf(contract_name, encoded_content, self.prompt_template)
+            
+            llm_result = self.llm_callback(prompt)
+            output_result = coerce_to_json(llm_result)
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(output_result, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"Saved results: {output_path}")
+            result = "Successfully!"
+            
+        except Exception as e:
+            logger.error(f"Process failed for {file_name}: {e}")
+            result = f"Failed: {str(e)}"
+        
+        # Clean up temporary PDF file if it was created
+        if file_extension != '.pdf' and os.path.exists(temp_pdf_path) and temp_pdf_path != file_path:
+            try:
+                os.remove(temp_pdf_path)
+            except Exception as e:
+                logger.warning(f"Failed to remove temporary file {temp_pdf_path}: {e}")
+        
+        return result
     
     def process_single_contract(self, contract_folder):
         contract_name = Path(contract_folder).name
@@ -208,113 +337,14 @@ class ContractMetadataExtractor:
         
         if not contract_files:
             logger.warning(f"No files in the folder: {contract_folder}")
-            return
+            return {}
         
         results = {}
         
         for contract_file in contract_files:
             file_path = os.path.join(contract_folder, contract_file)
-            output_filename = Path(contract_file).stem + '.json'
-            output_folder = os.path.join("output", contract_name)
-            os.makedirs(output_folder, exist_ok=True)
-            output_path = os.path.join(output_folder, output_filename)
-
-            if os.path.exists(output_path):
-                logger.info(f"File processed already: {output_path}")
-                results[Path(contract_file).name] = "Processed Already!"
-                continue
-
-            file_name = Path(contract_file).name
-            file_extension = Path(contract_file).suffix.lower()
-            logger.info(f"Processing file: {file_name}")
-
-            
-            os.makedirs("temp_conversions", exist_ok=True)
-            temp_pdf_path = os.path.join("temp_conversions", Path(contract_file).stem + '.pdf')
-            
-            
-            conversion_success = False
-            
-            if file_extension == '.pdf':
-                temp_pdf_path = file_path
-                conversion_success = True
-                
-            elif file_extension == '.docx':
-                try:
-                    convert(file_path, temp_pdf_path)
-                    conversion_success = True
-                except Exception as e:
-                    logger.error(f"Failed to convert DOCX to PDF: {e}")
-                    
-            elif file_extension in ['.xlsx', '.xls']:
-                conversion_success = self.convert_xlsx_to_pdf(file_path, temp_pdf_path)
-                
-            elif file_extension == '.csv':
-                conversion_success = self.convert_csv_to_pdf(file_path, temp_pdf_path)
-                
-            elif file_extension in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']:
-                conversion_success = self.convert_image_to_pdf(file_path, temp_pdf_path)
-                
-            elif file_extension == '.msg':
-                conversion_success = self.convert_msg_to_pdf(file_path, temp_pdf_path)
-
-            elif file_extension in ['.7z','zip']:
-                extracted_folder = os.path.join("temp_extracted",contract_name)
-                os.makedirs(extracted_folder,exist_ok=True)
-                self.extract_files_from_archive(file_path, extracted_folder)
-                results = self.process_single_contract(extracted_folder)
-                   
-            else:
-                logger.warning(f"Unsupported file format: {contract_file}")
-                results[file_name] = f"Unsupported format: {file_extension}"
-                continue
-
-            if not conversion_success:
-                logger.error(f"Failed to convert {file_name} to PDF")
-                results[file_name] = "Conversion to PDF failed"
-                continue
-
-            
-            page_count = self.get_pdf_page_count(temp_pdf_path)
-            logger.info(f"PDF page count: {page_count}")
-            
-            try:
-                if page_count > 100:
-                    
-                    logger.info(f"Document has {page_count} pages, converting to markdown...")
-                    markdown_content = self.convert_pdf_to_markdown(temp_pdf_path)
-                    
-                    if markdown_content:
-                        prompt = self.build_prompt_with_markdown(contract_name, markdown_content, self.prompt_template)
-                    else:
-                        
-                        logger.warning("Docling conversion failed, falling back to text extraction")
-                        text_content = self.extract_text_from_pdf(temp_pdf_path)
-                        prompt = self.build_prompt_with_text(contract_name, text_content, self.prompt_template)
-                else:
-                    
-                    encoded_content = self.file_to_base64(temp_pdf_path)
-                    prompt = self.build_prompt_with_pdf(contract_name, encoded_content, self.prompt_template)
-                
-                llm_result = self.llm_callback(prompt)
-                output_result = coerce_to_json(llm_result)
-                
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    json.dump(output_result, f, ensure_ascii=False, indent=2)
-                
-                logger.info(f"Saved results: {output_path}")
-                results[file_name] = "Successfully!"
-                
-            except Exception as e:
-                logger.error(f"Process failed for {contract_file}: {e}")
-                results[file_name] = f"Failed: {str(e)}"
-            
-            
-            if file_extension != '.pdf' and os.path.exists(temp_pdf_path):
-                try:
-                    os.remove(temp_pdf_path)
-                except Exception as e:
-                    logger.warning(f"Failed to remove temporary file {temp_pdf_path}: {e}")
+            file_result = self.process_single_file(file_path, contract_name)
+            results[contract_file] = file_result
         
         return results
     
@@ -378,15 +408,13 @@ class ContractMetadataExtractor:
         return prompt
 
 def llm_callback(prompt):
-
+    # Your existing LLM callback implementation
     def get_token():
         token_response = requests.get('https:', verify=False)
         token = token_response.json().get('access_token')
         return token
 
     TOKEN = get_token()
-
-
 
     headers = {'Authorization': f"Bearer {TOKEN}", 'Content-Type': 'application/json'}
     payload = {
