@@ -106,19 +106,40 @@ class ContractMetadataExtractor:
         """convert CSV to PDF"""
         try:
             df = pd.read_csv(csv_path)
-            html_content = f"<html><head><style>table {{border-collapse: collapse; width: 100%;}} th, td {{border: 1px solid black; padding: 8px; text-align: left;}}</style></head><body>"
-            html_content += df.to_html(index=False, classes='table table-striped')
-            html_content += "</body></html>"
             
+            # 创建支持中文的PDF
             pdf = FPDF()
             pdf.add_page()
-            pdf.set_font("Arial", size=10)
+            
+            # 添加支持中文的字体
+            try:
+                # 尝试使用系统中文字体
+                pdf.add_font('SimSun', '', 'C:/Windows/Fonts/simsun.ttc', uni=True)
+                pdf.set_font('SimSun', size=10)
+            except:
+                try:
+                    # 尝试其他中文字体
+                    pdf.add_font('DejaVu', '', 'DejaVuSans.ttf', uni=True)
+                    pdf.set_font('DejaVu', size=10)
+                except:
+                    # 回退到默认字体
+                    pdf.set_font("Arial", size=10)
+            
             pdf.cell(200, 10, txt=f"CSV File: {Path(csv_path).name}", ln=True, align='C')
             pdf.ln(10)
             
+            # 处理数据，确保字符串编码正确
             for index, row in df.iterrows():
-                line = " | ".join([str(x) for x in row.values])
-                pdf.multi_cell(0, 10, txt=line)
+                try:
+                    line = " | ".join([str(x) for x in row.values])
+                    # 确保文本正确编码
+                    if isinstance(line, str):
+                        line = line.encode('latin-1', 'replace').decode('latin-1')
+                    pdf.multi_cell(0, 10, txt=line)
+                except Exception as e:
+                    logger.warning(f"Error processing row {index}: {e}")
+                    continue
+                
                 if index > 50:
                     pdf.cell(0, 10, txt="... (truncated)", ln=True)
                     break
@@ -172,6 +193,17 @@ class ContractMetadataExtractor:
         finally:
             pythoncom.CoUninitialize()
 
+    def safe_text_for_pdf(self, text):
+        """确保文本可以安全地写入PDF"""
+        if text is None:
+            return ""
+        try:
+            # 尝试编码为latin-1，替换无法编码的字符
+            return text.encode('latin-1', 'replace').decode('latin-1')
+        except:
+            # 如果仍然失败，返回ASCII安全版本
+            return text.encode('ascii', 'ignore').decode('ascii')
+
     def convert_msg_to_pdf(self, msg_path, pdf_path):
         """Convert Outlook emails to PDF with attachment information"""
         try:
@@ -185,26 +217,43 @@ class ContractMetadataExtractor:
             
             # Build email content with attachment info
             content = f"""
-            Subject: {msg.Subject}
-            From: {msg.SenderName} ({msg.SenderEmailAddress})
-            To: {msg.To}
-            CC: {getattr(msg, 'CC', 'N/A')}
+            Subject: {self.safe_text_for_pdf(msg.Subject)}
+            From: {self.safe_text_for_pdf(msg.SenderName)} ({self.safe_text_for_pdf(msg.SenderEmailAddress)})
+            To: {self.safe_text_for_pdf(msg.To)}
+            CC: {self.safe_text_for_pdf(getattr(msg, 'CC', 'N/A'))}
             Date: {msg.SentOn}
             
             Body:
-            {msg.Body}
+            {self.safe_text_for_pdf(msg.Body)}
             
             Attachments ({len(attachments_info)}):
             """
             
             # Add attachment list
             for i, att_info in enumerate(attachments_info, 1):
-                content += f"\n{i}. {att_info['filename']} ({att_info['size']} bytes)"
+                content += f"\n{i}. {self.safe_text_for_pdf(att_info['filename'])} ({att_info['size']} bytes)"
             
+            # 创建PDF并处理编码问题
             pdf = FPDF()
             pdf.add_page()
-            pdf.set_font("Arial", size=10)
-            pdf.multi_cell(0, 8, txt=content)
+            
+            # 设置支持中文的字体
+            try:
+                # 尝试使用系统中文字体
+                pdf.add_font('SimSun', '', 'C:/Windows/Fonts/simsun.ttc', uni=True)
+                pdf.set_font('SimSun', size=10)
+            except:
+                try:
+                    # 尝试其他中文字体
+                    pdf.add_font('DejaVu', '', 'DejaVuSans.ttf', uni=True)
+                    pdf.set_font('DejaVu', size=10)
+                except:
+                    # 回退到默认字体
+                    pdf.set_font("Arial", size=10)
+            
+            # 安全写入文本
+            safe_content = self.safe_text_for_pdf(content)
+            pdf.multi_cell(0, 8, txt=safe_content)
             pdf.output(pdf_path)
             
             # Clean up temporary directory
