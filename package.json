@@ -1,43 +1,451 @@
-{
-  "name": "wechat-chatgpt",
-  "version": "1.0.0",
-  "description": "",
-  "main": "dist/main.js",
-  "export": "dist/main.js",
-  "scripts": {
-    "dev": "nodemon --exec node --loader ts-node/esm src/main.ts",
-    "build": "tsc"
-  },
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "async-retry": "^1.3.3",
-    "dotenv": "^16.0.3",
-    "execa": "^6.1.0",
-    "gpt3-tokenizer": "^1.1.5",
-    "openai": "^3.2.1",
-    "qrcode": "^1.5.1",
-    "uuid": "^9.0.0",
-    "wechaty": "^1.20.2",
-    "wechaty-puppet-wechat": "^1.18.4"
-  },
-  "devDependencies": {
-    "@types/async-retry": "^1.4.5",
-    "@types/qrcode": "^1.5.0",
-    "@types/uuid": "^9.0.0",
-    "nodemon": "^2.0.20",
-    "ts-node": "^10.9.1"
-  },
-  "nodemonConfig": {
-    "watch": [
-      "src/*.ts"
-    ],
-    "ignore": [
-      "src/main.ts"
-    ],
-    "ext": "ts",
-    "exec": "node --loader ts-node/esm src/main.ts",
-    "delay": 500
-  },
-  "type": "module"
-}
+import os
+import json
+from pathlib import Path
+import PyPDF2
+import zipfile
+import py7zr
+import base64
+import logging
+import requests
+from fpdf import FPDF
+from docx2pdf import convert
+import pandas as pd
+from docling.document_converter import DocumentConverter
+import img2pdf
+import win32com.client
+import pythoncom
+import urllib3
+from src.contract_extractor.utils.json_utils import coerce_to_json
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+class ContractMetadataExtractor:
+    def __init__(self, base_folder, prompt_template_path, llm_callback, output_folder):
+        self.base_folder = base_folder
+        self.llm_callback = llm_callback
+        self.output_folder = output_folder
+
+        with open(prompt_template_path, 'r', encoding='utf-8') as f:
+            self.prompt_template = f.read()
+    
+    def extract_text_from_pdf(self, pdf_path):
+        try:
+            with open(pdf_path, 'rb') as file:
+                pdf_reader = PyPDF2.PdfReader(file)
+                text = ""
+                for page in pdf_reader.pages:
+                    text += page.extract_text() + "\n"
+                return text
+        except Exception as e:
+            logger.error(f"Fail to extract file: {pdf_path}, error: {e}")
+            return None
+    
+    def get_pdf_page_count(self, pdf_path):
+        """Get the page count of PDF"""
+        try:
+            with open(pdf_path, 'rb') as file:
+                pdf_reader = PyPDF2.PdfReader(file)
+                return len(pdf_reader.pages)
+        except Exception as e:
+            logger.error(f"Failed to get page count for {pdf_path}: {e}")
+            return 0
+    
+    def convert_pdf_to_markdown(self, pdf_path):
+        try:
+            
+            converter = DocumentConverter()
+            result = converter.convert(pdf_path)
+            return result.document.text
+        except ImportError:
+            logger.error("Docling not installed. Please install it with: pip install docling")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to convert PDF to markdown: {e}")
+            return None
+        
+    # Function to convert file content to Base64
+    def file_to_base64(self, file_path):
+        try:
+            with open(file_path, "rb") as file:
+                # Read the file content as bytes and encode it to Base64
+                encoded_content = base64.b64encode(file.read()).decode('utf-8')
+            return encoded_content
+        except Exception as e:
+            print(f"Error converting file {file_path} to Base64: {e}")
+            return None
+    
+    def convert_xlsx_to_pdf(self, xlsx_path, pdf_path):
+        """convert Excel to PDF"""
+        try:
+            
+            df = pd.read_excel(xlsx_path, sheet_name=None)
+            
+            
+            html_content = "<html><head><style>table {border-collapse: collapse; width: 100%;} th, td {border: 1px solid black; padding: 8px; text-align: left;}</style></head><body>"
+            
+            for sheet_name, data in df.items():
+                html_content += f"<h2>Sheet: {sheet_name}</h2>"
+                html_content += data.to_html(index=False, classes='table table-striped')
+                html_content += "<br>"
+            
+            html_content += "</body></html>"
+                
+            return self._convert_xlsx_to_pdf_fallback(xlsx_path, pdf_path)
+                
+        except Exception as e:
+            logger.error(f"Failed to convert Excel to PDF: {e}")
+            return False
+    
+    def _convert_xlsx_to_pdf_fallback(self, xlsx_path, pdf_path):
+        
+        try:
+            df = pd.read_excel(xlsx_path)
+            csv_temp_path = pdf_path.replace('.pdf', '.csv')
+            df.to_csv(csv_temp_path, index=False)
+            return self.convert_csv_to_pdf(csv_temp_path, pdf_path)
+        except Exception as e:
+            logger.error(f"Fallback conversion failed: {e}")
+            return False
+    
+    def convert_csv_to_pdf(self, csv_path, pdf_path):
+        """convert CSV to PDF"""
+        try:
+            df = pd.read_csv(csv_path)
+            html_content = f"<html><head><style>table {{border-collapse: collapse; width: 100%;}} th, td {{border: 1px solid black; padding: 8px; text-align: left;}}</style></head><body>"
+            html_content += df.to_html(index=False, classes='table table-striped')
+            html_content += "</body></html>"
+            
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", size=10)
+        
+            pdf.cell(200, 10, txt=f"CSV File: {Path(csv_path).name}", ln=True, align='C')
+            pdf.ln(10)
+            
+            for index, row in df.iterrows():
+                line = " | ".join([str(x) for x in row.values])
+                pdf.multi_cell(0, 10, txt=line)
+                if index > 50:
+                    pdf.cell(0, 10, txt="... (truncated)", ln=True)
+                    break
+            
+            pdf.output(pdf_path)
+            return True
+                
+        except Exception as e:
+            logger.error(f"Failed to convert CSV to PDF: {e}")
+            return False
+    
+    def convert_image_to_pdf(self, image_path, pdf_path):
+        """convert image to PDF"""
+        try:
+            with open(pdf_path, "wb") as f:
+                f.write(img2pdf.convert(image_path))
+            return True
+        except Exception as e:
+            logger.error(f"Failed to convert image to PDF: {e}")
+            return False
+    
+    def convert_msg_to_pdf(self, msg_path, pdf_path):
+        """Convert Outlook emails to 为PDF"""
+        try:
+            pythoncom.CoInitialize()
+            
+            outlook = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
+            msg = outlook.OpenSharedItem(msg_path)
+            content = f"""
+            Subject: {msg.Subject}
+            From: {msg.SenderName} ({msg.SenderEmailAddress})
+            To: {msg.To}
+            Date: {msg.SentOn}
+            Body:
+            {msg.Body}
+            """
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", size=12)
+            pdf.multi_cell(0, 10, txt=content)
+            pdf.output(pdf_path)
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to convert MSG to PDF: {e}")
+            return False
+        finally:
+            pythoncom.CoUninitialize()
+
+    def extract_files_from_archive(self, archive_path, extract_to):
+        """Extract files from archive and return list of extracted file paths"""
+        extracted_files = []
+        try:
+            if archive_path.endswith('.zip'):
+                with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                    zip_ref.extractall(extract_to)
+                    extracted_files = [os.path.join(extract_to, f) for f in zip_ref.namelist()]
+            elif archive_path.endswith('.7z'):
+                with py7zr.SevenZipFile(archive_path, mode='r') as z:
+                    z.extractall(path=extract_to)
+                    extracted_files = [os.path.join(extract_to, f) for f in z.getnames()]
+            logger.info(f"Extracted {len(extracted_files)} files from {archive_path}")
+            return extracted_files
+        except Exception as e:
+            logger.error(f"Error extracting {archive_path}: {e}")
+            return []
+
+    def process_archive_files(self, archive_path, contract_name, file_name):
+        """Process archive files and return results"""
+        archive_results = {}
+        # Create unique extraction folder for this archive
+        extracted_folder = os.path.join("temp_extracted", contract_name, Path(file_name).stem)
+        os.makedirs(extracted_folder, exist_ok=True)
+        # Extract files from archive
+        extracted_files = self.extract_files_from_archive(archive_path, extracted_folder)
+        if not extracted_files:
+            archive_results[file_name] = "Failed to extract archive or archive is empty"
+            return archive_results
+        # Process each extracted file
+        for extracted_file in extracted_files:
+            if os.path.isfile(extracted_file):
+                extracted_file_name = Path(extracted_file).name
+                logger.info(f"Processing extracted file: {extracted_file_name}")
+                # Process the extracted file
+                file_result = self.process_single_file(extracted_file, contract_name)
+                archive_results[extracted_file_name] = file_result
+        
+        return archive_results
+
+    def process_single_file(self, file_path, contract_name):
+        """Process a single file and return result"""
+        file_name = Path(file_path).name
+        file_extension = Path(file_path).suffix.lower()
+        
+        output_filename = Path(file_name).stem + '.json'
+        output_folder = os.path.join(self.output_folder, contract_name)
+        os.makedirs(output_folder, exist_ok=True)
+        output_path = os.path.join(output_folder, output_filename)
+
+        if os.path.exists(output_path):
+            logger.info(f"File processed already: {output_path}")
+            return "Processed Already!"
+
+        logger.info(f"Processing file: {file_name}")
+
+        # Create temp directory for conversions
+        os.makedirs("temp_conversions", exist_ok=True)
+        temp_pdf_path = os.path.join("temp_conversions", Path(file_name).stem + '.pdf')
+        
+        conversion_success = False
+        
+        if file_extension == '.pdf':
+            temp_pdf_path = file_path
+            conversion_success = True
+            
+        elif file_extension == '.docx':
+            try:
+                convert(file_path, temp_pdf_path)
+                conversion_success = True
+            except Exception as e:
+                logger.error(f"Failed to convert DOCX to PDF: {e}")
+                
+        elif file_extension in ['.xlsx', '.xls']:
+            conversion_success = self.convert_xlsx_to_pdf(file_path, temp_pdf_path)
+            
+        elif file_extension == '.csv':
+            conversion_success = self.convert_csv_to_pdf(file_path, temp_pdf_path)
+            
+        elif file_extension in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']:
+            conversion_success = self.convert_image_to_pdf(file_path, temp_pdf_path)
+            
+        elif file_extension == '.msg':
+            conversion_success = self.convert_msg_to_pdf(file_path, temp_pdf_path)
+            
+        elif file_extension in ['.7z', '.zip']:
+            # Handle nested archives recursively
+            archive_results = self.process_archive_files(file_path, contract_name, file_name)
+            return archive_results
+
+        else:
+            logger.warning(f"Unsupported file format: {file_name}")
+            return f"Unsupported format: {file_extension}"
+
+        if not conversion_success:
+            logger.error(f"Failed to convert {file_name} to PDF")
+            return "Conversion to PDF failed"
+
+        # Process the converted PDF
+        try:
+            page_count = self.get_pdf_page_count(temp_pdf_path)
+            logger.info(f"PDF page count: {page_count}")
+            
+            if page_count > 80:
+                logger.info(f"Document has {page_count} pages, converting to markdown...")
+                markdown_content = self.convert_pdf_to_markdown(temp_pdf_path)
+                
+                if markdown_content:
+                    prompt = self.build_prompt_with_markdown(contract_name, markdown_content, self.prompt_template)
+                else:
+                    logger.warning("Docling conversion failed, falling back to text extraction")
+                    text_content = self.extract_text_from_pdf(temp_pdf_path)
+                    prompt = self.build_prompt_with_text(contract_name, text_content, self.prompt_template)
+            else:
+                encoded_content = self.file_to_base64(temp_pdf_path)
+                prompt = self.build_prompt_with_pdf(contract_name, encoded_content, self.prompt_template)
+            
+            llm_result = self.llm_callback(prompt)
+            output_result = coerce_to_json(llm_result)
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(output_result, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"Saved results: {output_path}")
+            result = "Successfully!"
+            
+        except Exception as e:
+            logger.error(f"Process failed for {file_name}: {e}")
+            result = f"Failed: {str(e)}"
+        
+        # Clean up temporary PDF file if it was created
+        if file_extension != '.pdf' and os.path.exists(temp_pdf_path) and temp_pdf_path != file_path:
+            try:
+                os.remove(temp_pdf_path)
+            except Exception as e:
+                logger.warning(f"Failed to remove temporary file {temp_pdf_path}: {e}")
+        
+        return result
+    
+    def process_single_contract(self, contract_folder):
+        contract_name = Path(contract_folder).name
+        logger.info(f"Processing contract: {contract_name}")
+
+        contract_files = [f for f in os.listdir(contract_folder) if os.path.isfile(os.path.join(contract_folder, f))]
+        
+        if not contract_files:
+            logger.warning(f"No files in the folder: {contract_folder}")
+            return {}
+        
+        results = {}
+        
+        for contract_file in contract_files:
+            file_path = os.path.join(contract_folder, contract_file)
+            file_result = self.process_single_file(file_path, contract_name)
+            results[contract_file] = file_result
+        
+        return results
+    
+    def process_all_contracts(self):
+        all_results = {}
+
+        subfolders = [f.path for f in os.scandir(self.base_folder) if f.is_dir()]
+        
+        if not subfolders:
+            logger.warning(f"No sub folders in: {self.base_folder}")
+            return all_results
+        
+        for folder in subfolders:
+            try:
+                results = self.process_single_contract(folder)
+                if results:
+                    all_results[Path(folder).name] = results
+            except Exception as e:
+                logger.error(f"Folder process failed: {folder}: {e}")
+                all_results[Path(folder).name] = f"Failed: {str(e)}"
+        
+        return all_results
+    
+    def build_prompt_with_pdf(self, contract_number, pdf_base64, base_prompt):
+        """Build prompt that include the PDF file"""
+        prompt_replace = base_prompt.replace("{{contract_number}}", contract_number)
+        prompt = [{
+            "type": "text",
+            "text": prompt_replace
+        },
+        {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": pdf_base64
+            }
+        }]
+        return prompt
+    
+    def build_prompt_with_markdown(self, contract_number, markdown_content, base_prompt):
+        """Build prompt that include the markdown content"""
+        prompt_replace = base_prompt.replace("{{contract_number}}", contract_number)
+        full_prompt = f"{prompt_replace}\n\nDocument Content (Markdown format):\n{markdown_content}"
+        
+        prompt = [{
+            "type": "text",
+            "text": full_prompt
+        }]
+        return prompt
+    
+    def build_prompt_with_text(self, contract_number, text_content, base_prompt):
+        """Build prompt based on the text content only"""
+        prompt_replace = base_prompt.replace("{{contract_number}}", contract_number)
+        full_prompt = f"{prompt_replace}\n\nDocument Content:\n{text_content}"
+        
+        prompt = [{
+            "type": "text",
+            "text": full_prompt
+        }]
+        return prompt
+
+def llm_callback(prompt):
+    # Your existing LLM callback implementation
+    def get_token():
+        token_response = requests.get('', verify=False)
+        token = token_response.json().get('access_token')
+        return token
+
+    TOKEN = get_token()
+
+    headers = {'Authorization': f"Bearer {TOKEN}", 'Content-Type': 'application/json'}
+    payload = {
+        "model":"claude-sonnet-4-5",
+        "messages":[
+            {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "\nYou are an expert in document processing and meta data extraction"
+                }
+            ]
+        },
+            {
+                "role": "user",
+                "content": prompt
+            }  
+        ],
+        "temperature": 0.0,
+        "seed": 42
+    }
+    llm_response = requests.post('', json=payload, headers=headers, verify=False)
+
+    if llm_response.status_code == 200:
+        llm_output = llm_response.json().get('choices')[0]['message']['content']
+        return llm_output
+    else:
+        logger.error(f"Error in LLM response: {llm_response.status_code} - {llm_response.text}")
+        return None
+
+if __name__ == "__main__":
+    BASE_FOLDER = r"C:\Users\1657820\Documents\datasets\contract_extractor\Li"
+    PROMPT_TEMPLATE_PATH = r"config\config.txt"
+    
+    extractor = ContractMetadataExtractor(
+        base_folder=BASE_FOLDER,
+        prompt_template_path=PROMPT_TEMPLATE_PATH,
+        llm_callback=llm_callback,
+        output_folder= "fil_out")
+    
+    results = extractor.process_all_contracts()
+
+    report_path = os.path.join(BASE_FOLDER, "processing_report.json")
+    with open(report_path, 'w', encoding='utf-8') as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    
+    logger.info(f"Process completed! Saved in: {report_path}")
