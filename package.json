@@ -4,24 +4,13 @@ import plotly.graph_objects as go
 import networkx as nx
 from datetime import datetime
 import time
-import json
-import traceback
+from nebula3.gclient.net import ConnectionPool
+from nebula3.Config import Config
 
-# Nebula Graph imports
-try:
-    from nebula3.gclient.net import ConnectionPool
-    from nebula3.Config import Config
-    from nebula3.data.ResultSet import ResultSet
-    from nebula3.data.DataObject import Vertex, Edge, PathWrapper
-    NEBULA_AVAILABLE = True
-except ImportError:
-    NEBULA_AVAILABLE = False
-    st.warning("Nebula3 Python client not installed. Please run: pip install nebula3-python")
 
 # Page configuration
 st.set_page_config(
     page_title="Nebula Graph Query Tool",
-    page_icon="🔮",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -65,23 +54,11 @@ st.markdown("""
         border-radius: 5px;
         margin-bottom: 15px;
     }
-    .vertex-info {
-        background-color: #e8f5e8;
-        padding: 10px;
-        border-radius: 5px;
-        margin: 5px 0;
-    }
-    .edge-info {
-        background-color: #e8f0f8;
-        padding: 10px;
-        border-radius: 5px;
-        margin: 5px 0;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # Application title
-st.markdown('<h1 class="main-header">🔮 Nebula Graph Query & Visualization Tool</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">Nebula Graph Query & Visualization Tool</h1>', unsafe_allow_html=True)
 
 # Initialize session state
 if 'connection_pool' not in st.session_state:
@@ -96,178 +73,57 @@ if 'available_spaces' not in st.session_state:
     st.session_state.available_spaces = []
 
 def get_value_as_string(value_wrapper):
-    """Extract string value from ValueWrapper object - Handle complex types"""
+    """Extract string value from ValueWrapper object - Fixed version"""
     try:
-        # Handle empty and null values
-        if value_wrapper.is_empty():
-            return ""
-        if value_wrapper.is_null():
-            return "NULL"
+        # Try get_as_string method first (for newer versions)
+        if hasattr(value_wrapper, 'get_as_string'):
+            result = value_wrapper.get_as_string()
+            # If result is bytes, decode it
+            if isinstance(result, bytes):
+                return result.decode('utf-8')
+            return result
         
-        # Handle Vertex type
-        if value_wrapper.is_vertex():
-            vertex = value_wrapper.get_vertex()
-            vid = vertex.get_id()
-            
-            # Get vertex ID as string
-            if hasattr(vid, 'get_sVal'):
-                vid_str = vid.get_sVal()
-            elif hasattr(vid, 'get_iVal'):
-                vid_str = str(vid.get_iVal())
-            else:
-                vid_str = str(vid)
-            
-            # Decode if bytes
-            if isinstance(vid_str, bytes):
-                vid_str = vid_str.decode('utf-8')
-            
-            # Get tags
-            tags = vertex.tags
-            tag_info = []
-            for tag in tags:
-                tag_name = tag.decode('utf-8') if isinstance(tag, bytes) else str(tag)
-                tag_info.append(tag_name)
-            
-            # Get properties
-            props = {}
-            for tag in tags:
-                tag_name = tag.decode('utf-8') if isinstance(tag, bytes) else str(tag)
-                tag_props = vertex.properties(tag_name)
-                if tag_props:
-                    for key, value in tag_props.items():
-                        key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
-                        if hasattr(value, 'get_sVal'):
-                            val_str = value.get_sVal()
-                        elif hasattr(value, 'get_iVal'):
-                            val_str = str(value.get_iVal())
-                        else:
-                            val_str = str(value)
-                        
-                        if isinstance(val_str, bytes):
-                            val_str = val_str.decode('utf-8')
-                        
-                        props[f"{tag_name}.{key_str}"] = val_str
-            
-            return f"Vertex(id={vid_str}, tags={tag_info}, props={props})"
+        # Try cast_string method
+        if hasattr(value_wrapper, 'cast_string'):
+            result = value_wrapper.cast_string()
+            if isinstance(result, bytes):
+                return result.decode('utf-8')
+            return result
         
-        # Handle Edge type
-        elif value_wrapper.is_edge():
-            edge = value_wrapper.get_edge()
-            
-            # Get source and destination
-            src = edge.src
-            dst = edge.dst
-            
-            if hasattr(src, 'get_sVal'):
-                src_str = src.get_sVal()
-            elif hasattr(src, 'get_iVal'):
-                src_str = str(src.get_iVal())
-            else:
-                src_str = str(src)
-            
-            if hasattr(dst, 'get_sVal'):
-                dst_str = dst.get_sVal()
-            elif hasattr(dst, 'get_iVal'):
-                dst_str = str(dst.get_iVal())
-            else:
-                dst_str = str(dst)
-            
-            # Decode if bytes
-            if isinstance(src_str, bytes):
-                src_str = src_str.decode('utf-8')
-            if isinstance(dst_str, bytes):
-                dst_str = dst_str.decode('utf-8')
-            
-            # Get edge type
-            edge_type = edge.edge_name
-            if isinstance(edge_type, bytes):
-                edge_type = edge_type.decode('utf-8')
-            
-            # Get properties
-            props = {}
-            edge_props = edge.properties
-            if edge_props:
-                for key, value in edge_props.items():
-                    key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
-                    if hasattr(value, 'get_sVal'):
-                        val_str = value.get_sVal()
-                    elif hasattr(value, 'get_iVal'):
-                        val_str = str(value.get_iVal())
-                    else:
-                        val_str = str(value)
-                    
-                    if isinstance(val_str, bytes):
-                        val_str = val_str.decode('utf-8')
-                    
-                    props[key_str] = val_str
-            
-            return f"Edge(src={src_str}->dst={dst_str}, type={edge_type}, props={props})"
+        # Try to get the value directly
+        if hasattr(value_wrapper, '_value'):
+            val = value_wrapper._value
+            if hasattr(val, 'get_sVal'):
+                result = val.get_sVal()
+                if isinstance(result, bytes):
+                    return result.decode('utf-8')
+                return result
+            elif hasattr(val, 'get_iVal'):
+                return str(val.get_iVal())
         
-        # Handle Path type
-        elif value_wrapper.is_path():
-            path = value_wrapper.get_path()
-            return f"Path(length={len(path.nodes)})"
-        
-        # Handle basic types
-        elif value_wrapper.is_string():
+        # For older versions of nebula-python
+        if hasattr(value_wrapper, 'get_string'):
             result = value_wrapper.get_string()
             if isinstance(result, bytes):
                 return result.decode('utf-8')
             return result
         
-        elif value_wrapper.is_int():
-            return str(value_wrapper.get_int())
+        # Last resort: convert to string and handle bytes
+        result = str(value_wrapper)
+        if result.startswith("b'") and result.endswith("'"):
+            # Remove b' prefix and ' suffix
+            return result[2:-1]
+        elif result.startswith('b"') and result.endswith('"'):
+            # Remove b" prefix and " suffix
+            return result[2:-1]
+        return result
         
-        elif value_wrapper.is_bool():
-            return str(value_wrapper.get_bool())
-        
-        elif value_wrapper.is_double():
-            return str(value_wrapper.get_double())
-        
-        elif value_wrapper.is_list():
-            # Handle lists
-            list_val = value_wrapper.get_list()
-            items = []
-            for item in list_val:
-                items.append(get_value_as_string(item))
-            return f"[{', '.join(items)}]"
-        
-        elif value_wrapper.is_set():
-            # Handle sets
-            set_val = value_wrapper.get_set()
-            items = []
-            for item in set_val:
-                items.append(get_value_as_string(item))
-            return f"{{{', '.join(items)}}}"
-        
-        elif value_wrapper.is_map():
-            # Handle maps
-            map_val = value_wrapper.get_map()
-            items = []
-            for key, value in map_val.items():
-                key_str = get_value_as_string(key)
-                val_str = get_value_as_string(value)
-                items.append(f"{key_str}: {val_str}")
-            return f"{{{', '.join(items)}}}"
-        
-        else:
-            # Fallback to string representation
-            result = str(value_wrapper)
-            # Clean up byte strings
-            if result.startswith("b'") and result.endswith("'"):
-                return result[2:-1]
-            elif result.startswith('b"') and result.endswith('"'):
-                return result[2:-1]
-            return result
-            
     except Exception as e:
-        # Return error information for debugging
-        return f"[Error processing value: {str(e)}]"
+        # Return a string representation for debugging
+        return f"[Error: {str(e)}]"
 
 def initialize_nebula_connection():
     """Initialize Nebula Graph connection"""
-    if not NEBULA_AVAILABLE:
-        return False
     
     try:
         config = Config()
@@ -319,18 +175,46 @@ def fetch_available_spaces():
         if result.is_succeeded():
             spaces = []
             
-            for record in result:
+            # Get column names for debugging
+            columns = result.keys()
+            
+            for i, record in enumerate(result):
                 try:
                     values = record.values()
+                    
+                    # Try to get the space name from the first column
                     if values and len(values) > 0:
-                        # Get the first column value as space name
-                        space_name = get_value_as_string(values[0])
+                        first_value = values[0]
+                        
+                        # Get the value as string (handles bytes automatically)
+                        space_name = get_value_as_string(first_value)
                         
                         # Clean up the space name
-                        if space_name and space_name not in ['NULL', 'None', '', 'null']:
-                            spaces.append(space_name)
+                        if space_name:
+                            # Remove any quotes or brackets
+                            space_name = space_name.strip()
                             
-                except Exception:
+                            # Remove b' prefix if still present
+                            if space_name.startswith("b'") and space_name.endswith("'"):
+                                space_name = space_name[2:-1]
+                            elif space_name.startswith('b"') and space_name.endswith('"'):
+                                space_name = space_name[2:-1]
+                            
+                            # Remove any surrounding quotes
+                            if (space_name.startswith("'") and space_name.endswith("'")) or \
+                               (space_name.startswith('"') and space_name.endswith('"')):
+                                space_name = space_name[1:-1]
+                            
+                            # Only add if it's a valid name
+                            if space_name and space_name not in ['NULL', 'None', '', 'null']:
+                                # Ensure it's a string (not bytes)
+                                if isinstance(space_name, bytes):
+                                    space_name = space_name.decode('utf-8')
+                                
+                                spaces.append(space_name)
+                                
+                except Exception as e:
+                    # Skip this row if there's an error
                     continue
             
             st.session_state.available_spaces = spaces
@@ -450,7 +334,7 @@ def check_query_requires_space(query):
     return True
 
 def display_result_table(result):
-    """Display result in a table format - Handle complex graph types"""
+    """Display result in a simple table format"""
     if not result or not result.is_succeeded():
         return None
     
@@ -465,10 +349,13 @@ def display_result_table(result):
             for i, value_wrapper in enumerate(record.values()):
                 col_name = columns[i] if i < len(columns) else f"col_{i}"
                 
-                # Get the value as string using our improved function
+                # Get the value as string
                 cell_value = get_value_as_string(value_wrapper)
                 
-                # Store in row
+                # Ensure it's a string (not bytes)
+                if isinstance(cell_value, bytes):
+                    cell_value = cell_value.decode('utf-8')
+                
                 row[col_name] = cell_value
             
             data.append(row)
@@ -482,16 +369,16 @@ def display_result_table(result):
             
     except Exception as e:
         st.error(f"Error displaying result: {str(e)}")
-        st.code(traceback.format_exc())
         return None
 
-def extract_graph_data_from_df(df):
-    """Extract graph data (vertices and edges) from DataFrame for visualization"""
+def visualize_graph_from_dataframe(df):
+    """Create graph visualization from DataFrame"""
     if df is None or df.empty:
-        return None, None
+        return None
     
     try:
-        vertices = []
+        # Try to identify nodes and edges
+        nodes = set()
         edges = []
         
         # Look for vertex and edge patterns in the data
@@ -499,138 +386,100 @@ def extract_graph_data_from_df(df):
             for col in df.columns:
                 cell_value = str(row[col])
                 
-                # Check for vertex pattern
-                if cell_value.startswith("Vertex("):
-                    try:
-                        # Parse vertex information
-                        vertex_str = cell_value.split("Vertex(")[1].rstrip(")")
-                        # Extract ID
-                        if "id=" in vertex_str:
-                            id_part = vertex_str.split("id=")[1].split(",")[0]
-                            vertices.append(id_part.strip())
-                    except:
-                        continue
+                # Check for vertex pattern (e.g., "Vertex(some_id)")
+                if cell_value.startswith("Vertex(") and ")" in cell_value:
+                    node_id = cell_value.split("Vertex(")[1].split(")")[0]
+                    nodes.add(node_id)
                 
-                # Check for edge pattern
-                elif cell_value.startswith("Edge("):
-                    try:
-                        # Parse edge information
-                        edge_str = cell_value.split("Edge(")[1].rstrip(")")
-                        # Extract source and destination
-                        if "src=" in edge_str and "dst=" in edge_str:
-                            src_part = edge_str.split("src=")[1].split("->")[0]
-                            dst_part = edge_str.split("dst=")[1].split(",")[0]
-                            edges.append((src_part.strip(), dst_part.strip()))
-                    except:
-                        continue
+                # Check for edge pattern (e.g., "Edge(src->dst)")
+                elif cell_value.startswith("Edge(") and ")" in cell_value:
+                    edge_content = cell_value.split("Edge(")[1].split(")")[0]
+                    if "->" in edge_content:
+                        src, dst = edge_content.split("->")
+                        edges.append((src, dst))
+                        nodes.add(src)
+                        nodes.add(dst)
         
-        return vertices, edges
-        
-    except Exception as e:
-        st.warning(f"Could not extract graph data: {str(e)}")
-        return None, None
-
-def visualize_graph_from_data(df):
-    """Create graph visualization from DataFrame"""
-    if df is None or df.empty:
-        return None
-    
-    try:
-        # Extract vertices and edges
-        vertices, edges = extract_graph_data_from_df(df)
-        
-        if not vertices and not edges:
-            st.info("No graph data found in results. Try a different query.")
-            return None
-        
-        # Create graph
-        G = nx.Graph()
-        
-        # Add vertices
-        if vertices:
-            for vertex in vertices:
-                G.add_node(vertex)
-        
-        # Add edges
-        if edges:
+        # If we found nodes and edges, create a graph
+        if nodes:
+            G = nx.Graph()
+            
+            # Add nodes
+            for node in nodes:
+                G.add_node(node)
+            
+            # Add edges
             for src, dst in edges:
                 G.add_edge(src, dst)
-        
-        # If no edges but vertices, create a simple layout
-        if G.number_of_edges() == 0 and G.number_of_nodes() > 0:
-            # Create a simple tree structure
-            nodes = list(G.nodes())
-            for i in range(1, len(nodes)):
-                G.add_edge(nodes[i-1], nodes[i])
-        
-        # Create positions for nodes
-        if G.number_of_nodes() > 0:
-            pos = nx.spring_layout(G, seed=42, k=1)
+            
+            # Create positions for nodes
+            pos = nx.spring_layout(G, seed=42)
+            
+            # Create Plotly figure
+            edge_x = []
+            edge_y = []
+            for edge in G.edges():
+                x0, y0 = pos[edge[0]]
+                x1, y1 = pos[edge[1]]
+                edge_x.extend([x0, x1, None])
+                edge_y.extend([y0, y1, None])
+            
+            edge_trace = go.Scatter(
+                x=edge_x, y=edge_y,
+                line=dict(width=1, color='#888'),
+                hoverinfo='none',
+                mode='lines',
+                name='Edges'
+            )
+            
+            node_x = []
+            node_y = []
+            node_text = []
+            for node in G.nodes():
+                x, y = pos[node]
+                node_x.append(x)
+                node_y.append(y)
+                node_text.append(f"Node: {node}")
+            
+            node_trace = go.Scatter(
+                x=node_x, y=node_y,
+                mode='markers+text',
+                hoverinfo='text',
+                text=list(G.nodes()),
+                textposition="bottom center",
+                marker=dict(
+                    showscale=True,
+                    colorscale='YlGnBu',
+                    size=20,
+                    color=[],
+                    line_width=2
+                ),
+                name='Nodes'
+            )
+            
+            fig = go.Figure(data=[edge_trace, node_trace],
+                           layout=go.Layout(
+                               title='Graph Visualization',
+                               titlefont_size=16,
+                               showlegend=False,
+                               hovermode='closest',
+                               margin=dict(b=20,l=5,r=5,t=40),
+                               xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                               yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+                           ))
+            
+            return fig
         else:
+            # If no graph data found, return None
             return None
-        
-        # Create Plotly figure
-        edge_x = []
-        edge_y = []
-        for edge in G.edges():
-            x0, y0 = pos[edge[0]]
-            x1, y1 = pos[edge[1]]
-            edge_x.extend([x0, x1, None])
-            edge_y.extend([y0, y1, None])
-        
-        edge_trace = go.Scatter(
-            x=edge_x, y=edge_y,
-            line=dict(width=1, color='#888'),
-            hoverinfo='none',
-            mode='lines',
-            name='Edges'
-        )
-        
-        node_x = []
-        node_y = []
-        node_text = []
-        for node in G.nodes():
-            x, y = pos[node]
-            node_x.append(x)
-            node_y.append(y)
-            node_text.append(f"Node: {node}")
-        
-        node_trace = go.Scatter(
-            x=node_x, y=node_y,
-            mode='markers+text',
-            hoverinfo='text',
-            text=list(G.nodes()),
-            textposition="bottom center",
-            marker=dict(
-                showscale=True,
-                colorscale='YlGnBu',
-                size=20,
-                color=[],
-                line_width=2
-            ),
-            name='Nodes'
-        )
-        
-        fig = go.Figure(data=[edge_trace, node_trace],
-                       layout=go.Layout(
-                           title='Graph Visualization',
-                           titlefont_size=16,
-                           showlegend=False,
-                           hovermode='closest',
-                           margin=dict(b=20,l=5,r=5,t=40),
-                           xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                           yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
-                       ))
-        
-        return fig
-        
+            
     except Exception as e:
         st.warning(f"Could not create graph visualization: {str(e)}")
         return None
 
 # Sidebar - Connection Configuration
 with st.sidebar:
-    st.header("🔗 Connection Configuration")
+    st.header("Connection Configuration")
     
     # Connection parameters
     nebula_host = st.text_input("Nebula Graph Address", value="127.0.0.1", key="nebula_host")
@@ -658,7 +507,7 @@ with st.sidebar:
     st.divider()
     
     # Space Selection
-    st.header("🌌 Space Management")
+    st.header("Space Management")
     
     if st.session_state.session:
         st.markdown('<div class="space-selector">', unsafe_allow_html=True)
@@ -667,7 +516,7 @@ with st.sidebar:
         st.write(f"**Current Space:** `{current_space}`")
         
         # Refresh spaces button
-        if st.button("🔄 Refresh Spaces", use_container_width=True):
+        if st.button("Refresh Spaces", use_container_width=True):
             with st.spinner("Fetching spaces..."):
                 fetch_available_spaces()
                 st.rerun()
@@ -688,12 +537,6 @@ with st.sidebar:
                         st.success(f"Switched to space: {selected_space}")
                         st.rerun()
             
-            st.write(f"**Available spaces ({len(st.session_state.available_spaces)}):**")
-            for space in st.session_state.available_spaces:
-                if space == st.session_state.current_space:
-                    st.markdown(f"✅ `{space}`")
-                else:
-                    st.markdown(f"`{space}`")
         else:
             st.info("No spaces found. Create a space first.")
             if st.button("Show CREATE SPACE Example", use_container_width=True):
@@ -706,12 +549,12 @@ with st.sidebar:
     st.divider()
     
     # Query History
-    st.header("📜 Query History")
+    st.header("Query History")
     if st.session_state.query_history:
         for i, record in enumerate(reversed(st.session_state.query_history[-5:])):
             with st.expander(f"{record['timestamp']} - {record['query'][:50]}..."):
                 st.code(record['query'])
-                status = "✅ Success" if record['success'] else "❌ Failed"
+                status = "Success" if record['success'] else "Failed"
                 st.caption(f"Status: {status}")
                 st.caption(f"Time: {record['time']}")
                 if record.get('space'):
@@ -720,32 +563,16 @@ with st.sidebar:
         st.caption("No query history yet")
     
     st.divider()
-    
-    # Query Examples
-    st.header("💡 Query Examples")
-    examples = {
-        "Show all spaces": "SHOW SPACES",
-        "Create test space": "CREATE SPACE IF NOT EXISTS test_space(vid_type=FIXED_STRING(30))",
-        "Show tags": "SHOW TAGS",
-        "Show edge types": "SHOW EDGES",
-        "Simple vertex query": "MATCH (v) RETURN v LIMIT 5",
-        "Vertex-edge query": "MATCH (v)-[e]->(n) RETURN v, e, n LIMIT 10",
-        "Optional match query": "MATCH (v) OPTIONAL MATCH (v)-[e]->(n) RETURN v, e, n LIMIT 5"
-    }
-    
-    selected_example = st.selectbox("Select example query", list(examples.keys()))
-    if st.button("Use Example", use_container_width=True):
-        st.session_state.example_query = examples[selected_example]
 
 # Main Interface
-tab1, tab2, tab3 = st.tabs(["📝 Query Editor", "📊 Data Visualization", "📈 System Status"])
+tab1, tab2, tab3 = st.tabs(["Query Editor", "Data Visualization", "System Status"])
 
 with tab1:
     st.markdown('<div class="query-box">', unsafe_allow_html=True)
     
     # Space warning
     if st.session_state.session and not st.session_state.current_space:
-        st.warning("⚠️ No graph space selected. Most queries require a space. Select one from the sidebar or use: `USE your_space_name;`")
+        st.warning("No graph space selected. Most queries require a space. Select one from the sidebar or use: `USE your_space_name;`")
     
     # Query input
     query_input = st.text_area(
@@ -758,15 +585,15 @@ with tab1:
     
     col1, col2, col3 = st.columns([1, 1, 2])
     with col1:
-        execute_btn = st.button("🚀 Execute Query", use_container_width=True, type="primary")
+        execute_btn = st.button("Execute Query", use_container_width=True, type="primary")
     with col2:
-        if st.button("🔄 Clear Results", use_container_width=True):
+        if st.button("Clear Results", use_container_width=True):
             if 'last_result_df' in st.session_state:
                 del st.session_state.last_result_df
     with col3:
         space_info = st.empty()
         if st.session_state.current_space:
-            space_info.success(f"✅ Current space: **{st.session_state.current_space}**")
+            space_info.success(f"Current space: **{st.session_state.current_space}**")
     
     st.markdown('</div>', unsafe_allow_html=True)
     
@@ -792,26 +619,9 @@ with tab1:
                         # Save result for visualization
                         st.session_state.last_result_df = df
                         
-                        # Show detailed view for complex types
-                        with st.expander("🔍 Detailed View of Complex Types"):
-                            # Check if we have vertex or edge columns
-                            vertex_columns = [col for col in df.columns if df[col].astype(str).str.contains('Vertex\(').any()]
-                            edge_columns = [col for col in df.columns if df[col].astype(str).str.contains('Edge\(').any()]
-                            
-                            if vertex_columns:
-                                st.markdown("### 📍 Vertices Found")
-                                for col in vertex_columns:
-                                    for idx, value in enumerate(df[col].head(3)):  # Show first 3
-                                        if 'Vertex(' in str(value):
-                                            st.markdown(f'<div class="vertex-info">**Row {idx}, Column "{col}"**: {value}</div>', unsafe_allow_html=True)
-                            
-                            if edge_columns:
-                                st.markdown("### 🔗 Edges Found")
-                                for col in edge_columns:
-                                    for idx, value in enumerate(df[col].head(3)):  # Show first 3
-                                        if 'Edge(' in str(value):
-                                            st.markdown(f'<div class="edge-info">**Row {idx}, Column "{col}"**: {value}</div>', unsafe_allow_html=True)
-                        
+                        # Show raw data
+                        with st.expander("View Raw Data"):
+                            st.json(df.to_dict(orient='records'))
                     else:
                         st.info("Query succeeded but no data returned")
                         if hasattr(result, 'comment') and result.comment():
@@ -822,7 +632,7 @@ with tab1:
                     
                     # Provide helpful suggestions based on error
                     if "space was not chosen" in error_msg.lower():
-                        st.info("💡 **Solution:** You need to select a graph space first. Either:")
+                        st.info("**Solution:** You need to select a graph space first. Either:")
                         st.markdown("1. Select a space from the sidebar dropdown")
                         st.markdown("2. Add `USE your_space_name;` at the beginning of your query")
                         st.markdown("3. Create a new space with `CREATE SPACE your_space_name(...)`")
@@ -836,7 +646,7 @@ with tab2:
         # Visualization type selection
         viz_type = st.radio(
             "Select Visualization Type",
-            ["Table View", "Graph View", "Statistics", "JSON View"],
+            ["Table View", "Graph View", "Statistics"],
             horizontal=True
         )
         
@@ -857,7 +667,7 @@ with tab2:
                     )
         
         elif viz_type == "Graph View":
-            fig = visualize_graph_from_data(df)
+            fig = visualize_graph_from_dataframe(df)
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
             else:
@@ -875,52 +685,28 @@ with tab2:
                 st.markdown('</div>', unsafe_allow_html=True)
                 
                 # Data type statistics
-                st.subheader("Column Types")
-                type_info = []
+                st.subheader("Data Types")
+                type_counts = df.dtypes.value_counts()
+                if not type_counts.empty:
+                    st.bar_chart(type_counts)
+                else:
+                    st.info("No type information available")
+            
+            with col2:
+                st.subheader("Column Information")
+                column_info = []
                 for col in df.columns:
-                    # Check if column contains graph types
-                    if df[col].astype(str).str.contains('Vertex\(').any():
-                        col_type = "Vertex"
-                    elif df[col].astype(str).str.contains('Edge\(').any():
-                        col_type = "Edge"
-                    elif df[col].astype(str).str.contains('Path\(').any():
-                        col_type = "Path"
-                    else:
-                        col_type = str(df[col].dtype)
-                    
+                    col_type = str(df[col].dtype)
                     non_null = df[col].notnull().sum()
                     unique_count = df[col].nunique()
-                    type_info.append({
+                    column_info.append({
                         'Column': col,
                         'Type': col_type,
                         'Non-Null': non_null,
                         'Unique': unique_count
                     })
-                
-                if type_info:
-                    st.dataframe(pd.DataFrame(type_info), use_container_width=True)
-            
-            with col2:
-                st.subheader("Graph Data Analysis")
-                # Count vertices and edges
-                vertex_count = 0
-                edge_count = 0
-                
-                for col in df.columns:
-                    if df[col].astype(str).str.contains('Vertex\(').any():
-                        vertex_count += df[col].notnull().sum()
-                    if df[col].astype(str).str.contains('Edge\(').any():
-                        edge_count += df[col].notnull().sum()
-                
-                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.metric("Vertices Found", vertex_count)
-                st.metric("Edges Found", edge_count)
-                st.markdown('</div>', unsafe_allow_html=True)
-        
-        elif viz_type == "JSON View":
-            # Show data as JSON
-            json_data = df.to_dict(orient='records')
-            st.json(json_data)
+                if column_info:
+                    st.dataframe(pd.DataFrame(column_info), use_container_width=True)
     
     else:
         st.info("Please execute a query in the Query Editor tab first")
@@ -935,12 +721,12 @@ with tab3:
         status_card = st.container()
         with status_card:
             if st.session_state.session:
-                st.success("✅ Connected")
+                st.success("Connected")
                 st.metric("Current Space", st.session_state.current_space or "Not selected")
                 if st.session_state.current_space:
                     st.markdown(f"Space selected: `{st.session_state.current_space}`")
             else:
-                st.error("❌ Not connected")
+                st.error("Not connected")
         
         st.subheader("Query Statistics")
         if st.session_state.query_history:
@@ -958,11 +744,11 @@ with tab3:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         st.write(f"Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         st.write(f"Streamlit Version: {st.__version__}")
-        st.write(f"Nebula Client Available: {NEBULA_AVAILABLE}")
         st.write(f"Available Spaces: {len(st.session_state.available_spaces)}")
         
-        # Handle bytes in spaces list
+        # FIXED: Properly handle bytes in spaces list
         if st.session_state.available_spaces:
+            # Convert all items to strings, handling bytes if needed
             space_strings = []
             for space in st.session_state.available_spaces:
                 if isinstance(space, bytes):
@@ -973,8 +759,8 @@ with tab3:
                 else:
                     space_strings.append(str(space))
             
+            # Now we can safely join
             st.write("Spaces:", ", ".join(space_strings))
-        
         st.markdown('</div>', unsafe_allow_html=True)
         
         # Quick actions
@@ -996,71 +782,3 @@ with tab3:
 # Footer
 st.divider()
 st.caption("Nebula Graph Query Tool | Using nGQL Query Language | Data Visualization")
-
-# Troubleshooting guide
-with st.expander("🔧 Graph Query Troubleshooting Guide"):
-    st.markdown("""
-    ### Understanding Graph Query Results
-    
-    When you run queries like `MATCH (v) OPTIONAL MATCH (v)-[e]->(n) RETURN v, e, n`, you get:
-    
-    1. **v (Vertex)**: Graph vertex object with ID, tags, and properties
-    2. **e (Edge)**: Graph edge object with source, destination, type, and properties  
-    3. **n (Vertex)**: Neighbor vertex object (or NULL if no edge exists)
-    
-    ### Why "Error" Appears
-    
-    In previous versions, the display function couldn't handle complex graph types. Now:
-    
-    - ✅ **Vertices** show as: `Vertex(id=..., tags=[...], props={...})`
-    - ✅ **Edges** show as: `Edge(src=...->dst=..., type=..., props={...})`
-    - ✅ **NULL values** show as: `NULL`
-    
-    ### Tips for Better Queries
-    
-    ```sql
-    -- 1. Limit results for testing
-    MATCH (v) OPTIONAL MATCH (v)-[e]->(n) RETURN v, e, n LIMIT 10
-    
-    -- 2. Return specific properties
-    MATCH (v:player) RETURN v.player.name, v.player.age LIMIT 10
-    
-    -- 3. Use WHERE clause
-    MATCH (v:player)-[e:follows]->(n) 
-    WHERE v.player.age > 30 
-    RETURN v, e, n LIMIT 10
-    ```
-    
-    ### Common Issues
-    
-    1. **No data returned**: Make sure you've created vertices and edges
-    2. **NULL values**: OPTIONAL MATCH may return NULL if no matches
-    3. **Memory issues**: LIMIT large queries (like 3000 rows)
-    """)
-
-# Add a simpler query helper
-with st.expander("📋 Simple Query Templates"):
-    template = st.selectbox(
-        "Choose a query template",
-        [
-            "Basic vertex query",
-            "Basic edge query", 
-            "Vertex with properties",
-            "Path query",
-            "Aggregation query"
-        ]
-    )
-    
-    templates = {
-        "Basic vertex query": "MATCH (v) RETURN v LIMIT 10",
-        "Basic edge query": "MATCH ()-[e]->() RETURN e LIMIT 10",
-        "Vertex with properties": "MATCH (v:player) RETURN v.player.name AS name, v.player.age AS age LIMIT 10",
-        "Path query": "MATCH p=(v1)-[e*2]-(v2) RETURN p LIMIT 5",
-        "Aggregation query": "MATCH (v:player) RETURN COUNT(v) AS player_count"
-    }
-    
-    if template in templates:
-        st.code(templates[template], language="sql")
-        if st.button(f"Use {template} Template", use_container_width=True):
-            st.session_state.example_query = templates[template]
-            st.rerun()
