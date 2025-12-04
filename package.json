@@ -1,1 +1,798 @@
-Failed to fetch spaces: 'ValueWrapper' object has no attribute 'get_string'
+import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
+import networkx as nx
+from datetime import datetime
+import time
+
+# Nebula Graph imports
+try:
+    from nebula3.gclient.net import ConnectionPool
+    from nebula3.Config import Config
+    from nebula3.data.ResultSet import ResultSet
+    NEBULA_AVAILABLE = True
+except ImportError:
+    NEBULA_AVAILABLE = False
+    st.warning("Nebula3 Python client not installed. Please run: pip install nebula3-python")
+
+# Page configuration
+st.set_page_config(
+    page_title="Nebula Graph Query Tool",
+    page_icon="🔮",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        color: #4B8BBE;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .query-box {
+        background-color: #f0f2f6;
+        padding: 20px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+    }
+    .result-box {
+        background-color: #ffffff;
+        padding: 15px;
+        border-radius: 5px;
+        border-left: 4px solid #4B8BBE;
+        margin-top: 10px;
+    }
+    .stButton>button {
+        background-color: #4B8BBE;
+        color: white;
+        font-weight: bold;
+    }
+    .metric-card {
+        background-color: #f8f9fa;
+        padding: 15px;
+        border-radius: 10px;
+        border: 1px solid #dee2e6;
+    }
+    .space-selector {
+        background-color: #e8f4fd;
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 15px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Application title
+st.markdown('<h1 class="main-header">🔮 Nebula Graph Query & Visualization Tool</h1>', unsafe_allow_html=True)
+
+# Initialize session state
+if 'connection_pool' not in st.session_state:
+    st.session_state.connection_pool = None
+if 'session' not in st.session_state:
+    st.session_state.session = None
+if 'query_history' not in st.session_state:
+    st.session_state.query_history = []
+if 'current_space' not in st.session_state:
+    st.session_state.current_space = None
+if 'available_spaces' not in st.session_state:
+    st.session_state.available_spaces = []
+
+def get_value_as_string(value_wrapper):
+    """Extract string value from ValueWrapper object"""
+    try:
+        if value_wrapper.is_string():
+            return value_wrapper.get_string()
+        elif value_wrapper.is_int():
+            return str(value_wrapper.get_int())
+        elif value_wrapper.is_bool():
+            return str(value_wrapper.get_bool())
+        elif value_wrapper.is_double():
+            return str(value_wrapper.get_double())
+        elif value_wrapper.is_time():
+            return str(value_wrapper.get_time())
+        elif value_wrapper.is_date():
+            return str(value_wrapper.get_date())
+        elif value_wrapper.is_datetime():
+            return str(value_wrapper.get_datetime())
+        elif value_wrapper.is_empty():
+            return ""
+        elif value_wrapper.is_null():
+            return "NULL"
+        else:
+            # Try to get as string representation
+            return str(value_wrapper)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+def initialize_nebula_connection():
+    """Initialize Nebula Graph connection"""
+    if not NEBULA_AVAILABLE:
+        return False
+    
+    try:
+        config = Config()
+        config.max_connection_pool_size = 10
+        
+        connection_pool = ConnectionPool()
+        
+        # Connection parameters
+        addresses = [(st.session_state.get('nebula_host', '127.0.0.1'), 
+                     st.session_state.get('nebula_port', 9669))]
+        
+        # Initialize connection pool
+        if not connection_pool.init(addresses, config):
+            st.error("Connection pool initialization failed")
+            return False
+        
+        # Get session
+        session = connection_pool.get_session(
+            st.session_state.get('nebula_username', 'root'),
+            st.session_state.get('nebula_password', 'nebula')
+        )
+        
+        # Test connection
+        result = session.execute("SHOW HOSTS")
+        if not result.is_succeeded():
+            st.error(f"Connection test failed: {result.error_msg()}")
+            session.release()
+            return False
+        
+        st.session_state.connection_pool = connection_pool
+        st.session_state.session = session
+        
+        # Fetch available spaces
+        fetch_available_spaces()
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Connection failed: {str(e)}")
+        return False
+
+def fetch_available_spaces():
+    """Fetch list of available graph spaces"""
+    if not st.session_state.session:
+        return []
+    
+    try:
+        result = st.session_state.session.execute("SHOW SPACES")
+        if result.is_succeeded():
+            spaces = []
+            for record in result:
+                # The space name is typically in the first column of the result
+                # We need to properly extract it from the ValueWrapper
+                if record.values():
+                    # Get the first value from the record
+                    value_wrapper = record.values()[0]
+                    space_name = get_value_as_string(value_wrapper)
+                    if space_name and space_name != "NULL" and not space_name.startswith("Error"):
+                        spaces.append(space_name)
+            
+            st.session_state.available_spaces = spaces
+            return spaces
+        else:
+            st.error(f"Failed to fetch spaces: {result.error_msg()}")
+            return []
+    except Exception as e:
+        st.error(f"Failed to fetch spaces: {str(e)}")
+        return []
+
+def switch_space(space_name):
+    """Switch to a specific graph space"""
+    if not st.session_state.session:
+        st.error("Please connect to Nebula Graph first")
+        return False
+    
+    try:
+        # Clean the space name
+        space_name = space_name.strip().replace(';', '')
+        
+        # Execute USE command
+        result = st.session_state.session.execute(f"USE {space_name}")
+        if result.is_succeeded():
+            st.session_state.current_space = space_name
+            return True
+        else:
+            st.error(f"Failed to switch space: {result.error_msg()}")
+            return False
+    except Exception as e:
+        st.error(f"Space switch error: {str(e)}")
+        return False
+
+def execute_query(query):
+    """Execute query statement"""
+    if not st.session_state.session:
+        st.error("Please connect to Nebula Graph first")
+        return None
+    
+    # Clean and prepare the query
+    query = query.strip()
+    if not query:
+        st.error("Query cannot be empty")
+        return None
+    
+    # Check if we need to be in a specific space
+    requires_space = check_query_requires_space(query)
+    
+    if requires_space and not st.session_state.current_space:
+        st.error("This query requires a graph space to be selected. Please select a space first.")
+        return None
+    
+    try:
+        # Execute query
+        start_time = time.time()
+        result = st.session_state.session.execute(query)
+        execution_time = time.time() - start_time
+        
+        # Record query history
+        query_record = {
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'query': query,
+            'success': result.is_succeeded(),
+            'time': f"{execution_time:.3f}s",
+            'space': st.session_state.current_space
+        }
+        st.session_state.query_history.append(query_record)
+        
+        # If this is a USE statement, update current space
+        if query.strip().upper().startswith("USE "):
+            if result.is_succeeded():
+                # Extract space name from USE command
+                parts = query.split()
+                if len(parts) >= 2:
+                    space_name = parts[1].replace(';', '')
+                    st.session_state.current_space = space_name
+                    st.success(f"Switched to space: {space_name}")
+                    # Refresh spaces list
+                    fetch_available_spaces()
+        
+        # If this is a CREATE SPACE or DROP SPACE command, refresh spaces
+        elif query.strip().upper().startswith(("CREATE SPACE", "DROP SPACE")):
+            if result.is_succeeded():
+                # Wait a moment for the space to be created/dropped
+                time.sleep(1)
+                fetch_available_spaces()
+        
+        return result
+        
+    except Exception as e:
+        st.error(f"Query execution error: {str(e)}")
+        return None
+
+def check_query_requires_space(query):
+    """Check if a query requires being in a graph space"""
+    query_upper = query.strip().upper()
+    
+    # Queries that don't require a space
+    no_space_queries = [
+        "SHOW SPACES",
+        "CREATE SPACE",
+        "DROP SPACE",
+        "DESC SPACE",
+        "SHOW HOSTS",
+        "SHOW SESSIONS",
+        "SHOW CONFIGS",
+        "SHOW USERS",
+        "SHOW ROLES"
+    ]
+    
+    # Check if query starts with any of the no-space queries
+    for no_space_query in no_space_queries:
+        if query_upper.startswith(no_space_query):
+            return False
+    
+    # Most other queries require a space
+    return True
+
+def result_to_dataframe(result):
+    """Convert Nebula query result to DataFrame"""
+    if not result or not result.is_succeeded():
+        return None
+    
+    try:
+        # Get column names
+        column_names = result.keys()
+        
+        # Get data
+        rows = []
+        for record in result:
+            row = []
+            for value_wrapper in record.values():
+                # Use our helper function to get the value as string
+                row_value = get_value_as_string(value_wrapper)
+                row.append(row_value)
+            rows.append(row)
+        
+        # Create DataFrame
+        df = pd.DataFrame(rows, columns=column_names)
+        return df
+        
+    except Exception as e:
+        st.error(f"Result conversion error: {str(e)}")
+        return None
+
+def visualize_graph_from_dataframe(df):
+    """Create graph visualization from DataFrame"""
+    if df is None or df.empty:
+        return None
+    
+    try:
+        # Try to identify nodes and edges
+        nodes = set()
+        edges = []
+        
+        # Look for vertex and edge patterns in the data
+        for idx, row in df.iterrows():
+            for col in df.columns:
+                cell_value = str(row[col])
+                
+                # Check for vertex pattern (e.g., "Vertex(some_id)")
+                if cell_value.startswith("Vertex(") and ")" in cell_value:
+                    node_id = cell_value.split("Vertex(")[1].split(")")[0]
+                    nodes.add(node_id)
+                
+                # Check for edge pattern (e.g., "Edge(src->dst)")
+                elif cell_value.startswith("Edge(") and ")" in cell_value:
+                    edge_content = cell_value.split("Edge(")[1].split(")")[0]
+                    if "->" in edge_content:
+                        src, dst = edge_content.split("->")
+                        edges.append((src, dst))
+                        nodes.add(src)
+                        nodes.add(dst)
+        
+        # If we found nodes and edges, create a graph
+        if nodes:
+            G = nx.Graph()
+            
+            # Add nodes
+            for node in nodes:
+                G.add_node(node)
+            
+            # Add edges
+            for src, dst in edges:
+                G.add_edge(src, dst)
+            
+            # Create positions for nodes
+            pos = nx.spring_layout(G, seed=42)
+            
+            # Create Plotly figure
+            edge_x = []
+            edge_y = []
+            for edge in G.edges():
+                x0, y0 = pos[edge[0]]
+                x1, y1 = pos[edge[1]]
+                edge_x.extend([x0, x1, None])
+                edge_y.extend([y0, y1, None])
+            
+            edge_trace = go.Scatter(
+                x=edge_x, y=edge_y,
+                line=dict(width=1, color='#888'),
+                hoverinfo='none',
+                mode='lines',
+                name='Edges'
+            )
+            
+            node_x = []
+            node_y = []
+            node_text = []
+            for node in G.nodes():
+                x, y = pos[node]
+                node_x.append(x)
+                node_y.append(y)
+                node_text.append(f"Node: {node}")
+            
+            node_trace = go.Scatter(
+                x=node_x, y=node_y,
+                mode='markers+text',
+                hoverinfo='text',
+                text=list(G.nodes()),
+                textposition="bottom center",
+                marker=dict(
+                    showscale=True,
+                    colorscale='YlGnBu',
+                    size=20,
+                    color=[],
+                    line_width=2
+                ),
+                name='Nodes'
+            )
+            
+            fig = go.Figure(data=[edge_trace, node_trace],
+                           layout=go.Layout(
+                               title='Graph Visualization',
+                               titlefont_size=16,
+                               showlegend=False,
+                               hovermode='closest',
+                               margin=dict(b=20,l=5,r=5,t=40),
+                               xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                               yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+                           ))
+            
+            return fig
+        else:
+            # If no graph data found, create a simple visualization of the dataframe
+            st.info("No graph data found in results. Showing data as table.")
+            return None
+            
+    except Exception as e:
+        st.warning(f"Could not create graph visualization: {str(e)}")
+        return None
+
+# Sidebar - Connection Configuration
+with st.sidebar:
+    st.header("🔗 Connection Configuration")
+    
+    # Connection parameters
+    nebula_host = st.text_input("Nebula Graph Address", value="127.0.0.1", key="nebula_host")
+    nebula_port = st.number_input("Port", value=9669, min_value=1, max_value=65535, key="nebula_port")
+    nebula_username = st.text_input("Username", value="root", key="nebula_username")
+    nebula_password = st.text_input("Password", value="nebula", type="password", key="nebula_password")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Connect to Nebula", use_container_width=True, type="primary"):
+            with st.spinner("Connecting..."):
+                if initialize_nebula_connection():
+                    st.success("Connected successfully!")
+    with col2:
+        if st.button("Disconnect", use_container_width=True):
+            if st.session_state.session:
+                st.session_state.session.release()
+                st.session_state.connection_pool.close()
+                st.session_state.session = None
+                st.session_state.connection_pool = None
+                st.session_state.current_space = None
+                st.session_state.available_spaces = []
+                st.info("Disconnected")
+    
+    st.divider()
+    
+    # Space Selection
+    st.header("🌌 Space Management")
+    
+    if st.session_state.session:
+        st.markdown('<div class="space-selector">', unsafe_allow_html=True)
+        
+        current_space = st.session_state.current_space or "No space selected"
+        st.write(f"**Current Space:** `{current_space}`")
+        
+        # Refresh spaces button
+        if st.button("🔄 Refresh Spaces", use_container_width=True):
+            fetch_available_spaces()
+            st.rerun()
+        
+        # Show available spaces
+        if st.session_state.available_spaces:
+            # Space selection dropdown
+            selected_space = st.selectbox(
+                "Select a Graph Space",
+                options=[""] + st.session_state.available_spaces,
+                index=0,
+                help="Select a graph space to work with"
+            )
+            
+            if selected_space:
+                if st.button(f"Switch to {selected_space}", use_container_width=True):
+                    if switch_space(selected_space):
+                        st.success(f"Switched to space: {selected_space}")
+                        st.rerun()
+            
+            st.write(f"**Available spaces ({len(st.session_state.available_spaces)}):**")
+            for space in st.session_state.available_spaces:
+                if space == st.session_state.current_space:
+                    st.markdown(f"✅ `{space}`")
+                else:
+                    st.markdown(f"`{space}`")
+        else:
+            st.info("No spaces found. Create a space first.")
+            if st.button("Show CREATE SPACE Example", use_container_width=True):
+                st.code("CREATE SPACE test_space(vid_type=FIXED_STRING(30))")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.info("Connect to see available spaces")
+    
+    st.divider()
+    
+    # Query History
+    st.header("📜 Query History")
+    if st.session_state.query_history:
+        for i, record in enumerate(reversed(st.session_state.query_history[-5:])):
+            with st.expander(f"{record['timestamp']} - {record['query'][:50]}..."):
+                st.code(record['query'])
+                status = "✅ Success" if record['success'] else "❌ Failed"
+                st.caption(f"Status: {status}")
+                st.caption(f"Time: {record['time']}")
+                if record.get('space'):
+                    st.caption(f"Space: {record['space']}")
+    else:
+        st.caption("No query history yet")
+    
+    st.divider()
+    
+    # Query Examples
+    st.header("💡 Query Examples")
+    examples = {
+        "Show all spaces": "SHOW SPACES",
+        "Create test space": "CREATE SPACE IF NOT EXISTS test_space(vid_type=FIXED_STRING(30))",
+        "Show tags": "SHOW TAGS",
+        "Show edge types": "SHOW EDGES",
+        "Simple vertex query": "MATCH (v) RETURN v LIMIT 5",
+        "Simple edge query": "MATCH ()-[e]->() RETURN e LIMIT 5"
+    }
+    
+    selected_example = st.selectbox("Select example query", list(examples.keys()))
+    if st.button("Use Example", use_container_width=True):
+        st.session_state.example_query = examples[selected_example]
+
+# Main Interface
+tab1, tab2, tab3 = st.tabs(["📝 Query Editor", "📊 Data Visualization", "📈 System Status"])
+
+with tab1:
+    st.markdown('<div class="query-box">', unsafe_allow_html=True)
+    
+    # Space warning
+    if st.session_state.session and not st.session_state.current_space:
+        st.warning("⚠️ No graph space selected. Most queries require a space. Select one from the sidebar or use: `USE your_space_name;`")
+    
+    # Query input
+    query_input = st.text_area(
+        "Enter Query Statement",
+        height=150,
+        value=st.session_state.get('example_query', ''),
+        placeholder="Enter your nGQL query, e.g.:\nUSE your_space_name;\nMATCH (v) RETURN v LIMIT 10",
+        key="query_input"
+    )
+    
+    col1, col2, col3 = st.columns([1, 1, 2])
+    with col1:
+        execute_btn = st.button("🚀 Execute Query", use_container_width=True, type="primary")
+    with col2:
+        if st.button("🔄 Clear Results", use_container_width=True):
+            if 'last_result_df' in st.session_state:
+                del st.session_state.last_result_df
+    with col3:
+        space_info = st.empty()
+        if st.session_state.current_space:
+            space_info.success(f"✅ Current space: **{st.session_state.current_space}**")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Execute query
+    if execute_btn and query_input:
+        with st.spinner("Executing query..."):
+            result = execute_query(query_input)
+            
+            if result:
+                if result.is_succeeded():
+                    st.success("Query executed successfully!")
+                    
+                    # Convert to DataFrame for display
+                    df = result_to_dataframe(result)
+                    
+                    if df is not None and not df.empty:
+                        # Display statistics
+                        st.info(f"Returned {len(df)} rows, {len(df.columns)} columns")
+                        
+                        # Display data table
+                        st.dataframe(df, use_container_width=True)
+                        
+                        # Save result for visualization
+                        st.session_state.last_result_df = df
+                        
+                        # Show raw data
+                        with st.expander("View Raw Data"):
+                            st.json(df.to_dict(orient='records'))
+                    else:
+                        st.info("Query succeeded but no data returned")
+                        if result.comment():
+                            st.write(f"Message: {result.comment()}")
+                else:
+                    error_msg = result.error_msg()
+                    st.error(f"Query failed: {error_msg}")
+                    
+                    # Provide helpful suggestions based on error
+                    if "space was not chosen" in error_msg.lower():
+                        st.info("💡 **Solution:** You need to select a graph space first. Either:")
+                        st.markdown("1. Select a space from the sidebar dropdown")
+                        st.markdown("2. Add `USE your_space_name;` at the beginning of your query")
+                        st.markdown("3. Create a new space with `CREATE SPACE your_space_name(...)`")
+
+with tab2:
+    st.header("Data Visualization")
+    
+    if 'last_result_df' in st.session_state and st.session_state.last_result_df is not None:
+        df = st.session_state.last_result_df
+        
+        # Visualization type selection
+        viz_type = st.radio(
+            "Select Visualization Type",
+            ["Table View", "Graph View", "Statistics"],
+            horizontal=True
+        )
+        
+        if viz_type == "Table View":
+            # Interactive data table
+            edited_df = st.data_editor(df, use_container_width=True)
+            
+            # Data export options
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("Export as CSV"):
+                    csv = df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="Download CSV",
+                        data=csv,
+                        file_name=f"nebula_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+        
+        elif viz_type == "Graph View":
+            fig = visualize_graph_from_dataframe(df)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("No graph data found in results. Showing table view instead:")
+                st.dataframe(df, use_container_width=True)
+            
+        elif viz_type == "Statistics":
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("Data Overview")
+                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                st.metric("Total Rows", len(df))
+                st.metric("Total Columns", len(df.columns))
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+                # Data type statistics
+                st.subheader("Data Types")
+                type_counts = df.dtypes.value_counts()
+                if not type_counts.empty:
+                    st.bar_chart(type_counts)
+                else:
+                    st.info("No type information available")
+            
+            with col2:
+                st.subheader("Column Information")
+                column_info = []
+                for col in df.columns:
+                    col_type = str(df[col].dtype)
+                    non_null = df[col].notnull().sum()
+                    unique_count = df[col].nunique()
+                    column_info.append({
+                        'Column': col,
+                        'Type': col_type,
+                        'Non-Null': non_null,
+                        'Unique': unique_count
+                    })
+                if column_info:
+                    st.dataframe(pd.DataFrame(column_info), use_container_width=True)
+    
+    else:
+        st.info("Please execute a query in the Query Editor tab first")
+
+with tab3:
+    st.header("System Status")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Connection Status")
+        status_card = st.container()
+        with status_card:
+            if st.session_state.session:
+                st.success("✅ Connected")
+                st.metric("Current Space", st.session_state.current_space or "Not selected")
+                if st.session_state.current_space:
+                    st.markdown(f"Space selected: `{st.session_state.current_space}`")
+            else:
+                st.error("❌ Not connected")
+        
+        st.subheader("Query Statistics")
+        if st.session_state.query_history:
+            total_queries = len(st.session_state.query_history)
+            successful_queries = sum(1 for q in st.session_state.query_history if q['success'])
+            success_rate = (successful_queries / total_queries * 100) if total_queries > 0 else 0
+            
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.metric("Total Queries", total_queries)
+            st.metric("Success Rate", f"{success_rate:.1f}%")
+            st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.subheader("System Information")
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.write(f"Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        st.write(f"Streamlit Version: {st.__version__}")
+        st.write(f"Nebula Client Available: {NEBULA_AVAILABLE}")
+        st.write(f"Available Spaces: {len(st.session_state.available_spaces)}")
+        if st.session_state.available_spaces:
+            st.write("Spaces:", ", ".join(st.session_state.available_spaces))
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Quick actions
+        st.subheader("Quick Actions")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Refresh Spaces", use_container_width=True):
+                if st.session_state.session:
+                    fetch_available_spaces()
+                    st.rerun()
+                else:
+                    st.error("Not connected")
+        
+        with col2:
+            if st.button("Clear History", use_container_width=True):
+                st.session_state.query_history = []
+                st.rerun()
+
+# Footer
+st.divider()
+st.caption("Nebula Graph Query Tool | Using nGQL Query Language | Data Visualization")
+
+# Usage tips
+with st.expander("💡 Usage Tips & Space Management"):
+    st.markdown("""
+    ### Getting Started Guide
+    
+    1. **Connect First**: Connect to Nebula Graph using the sidebar (default: 127.0.0.1:9669, root/nebula)
+    2. **Check Spaces**: After connecting, click "Refresh Spaces" to see available spaces
+    3. **Create Space**: If no spaces exist, use:
+       ```sql
+       CREATE SPACE test_space(vid_type=FIXED_STRING(30))
+       ```
+    4. **Select Space**: Choose your space from the dropdown
+    5. **Start Querying**: Now you can run queries!
+    
+    ### Common Commands
+    
+    ```sql
+    -- List all spaces
+    SHOW SPACES
+    
+    -- Create a space
+    CREATE SPACE my_space(vid_type=FIXED_STRING(30))
+    
+    -- Switch space
+    USE my_space
+    
+    -- Show schema (after switching to a space)
+    SHOW TAGS
+    SHOW EDGES
+    
+    -- Simple queries
+    MATCH (v) RETURN v LIMIT 10
+    MATCH ()-[e]->() RETURN e LIMIT 10
+    ```
+    
+    ### Troubleshooting
+    
+    - **"space was not chosen"**: Select a space or use `USE space_name;`
+    - **Connection failed**: Check if Nebula Graph is running on the specified address/port
+    - **No spaces shown**: You may need to create a space first
+    """)
+
+# Add space creation helper
+with st.expander("🔧 Space Creation Helper"):
+    space_name = st.text_input("New Space Name", placeholder="my_graph_space", key="new_space_name")
+    vid_type = st.selectbox("VID Type", ["FIXED_STRING(30)", "INT64", "FIXED_STRING(64)"], key="vid_type_select")
+    
+    if space_name:
+        create_command = f"CREATE SPACE IF NOT EXISTS {space_name}(vid_type={vid_type})"
+        st.code(create_command, language="sql")
+        
+        if st.button("Execute CREATE SPACE Command", use_container_width=True):
+            if st.session_state.session:
+                result = execute_query(create_command)
+                if result and result.is_succeeded():
+                    st.success(f"Space '{space_name}' created successfully!")
+                    # Wait and refresh spaces
+                    time.sleep(2)
+                    fetch_available_spaces()
+                    st.rerun()
+            else:
+                st.error("Not connected to Nebula Graph")
