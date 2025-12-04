@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import networkx as nx
 from datetime import datetime
 import time
+import traceback
 
 # Nebula Graph imports
 try:
@@ -81,31 +82,41 @@ if 'available_spaces' not in st.session_state:
     st.session_state.available_spaces = []
 
 def get_value_as_string(value_wrapper):
-    """Extract string value from ValueWrapper object"""
+    """Extract string value from ValueWrapper object - Fixed version"""
     try:
-        if value_wrapper.is_string():
+        # Debug: print the type and methods available
+        # print(f"ValueWrapper type: {type(value_wrapper)}")
+        
+        # First check if it's a ValueWrapper with get_as_string method
+        if hasattr(value_wrapper, 'get_as_string'):
+            return value_wrapper.get_as_string()
+        
+        # Check for other methods that might return the string
+        if hasattr(value_wrapper, 'cast_string'):
+            return value_wrapper.cast_string()
+        
+        # Try to get the value directly
+        if hasattr(value_wrapper, '_value'):
+            val = value_wrapper._value
+            if hasattr(val, 'get_sVal'):
+                return val.get_sVal()
+            elif hasattr(val, 'get_iVal'):
+                return str(val.get_iVal())
+        
+        # For newer versions of nebula-python
+        if hasattr(value_wrapper, 'as_string'):
+            return value_wrapper.as_string()
+        
+        # For older versions of nebula-python
+        if hasattr(value_wrapper, 'get_string'):
             return value_wrapper.get_string()
-        elif value_wrapper.is_int():
-            return str(value_wrapper.get_int())
-        elif value_wrapper.is_bool():
-            return str(value_wrapper.get_bool())
-        elif value_wrapper.is_double():
-            return str(value_wrapper.get_double())
-        elif value_wrapper.is_time():
-            return str(value_wrapper.get_time())
-        elif value_wrapper.is_date():
-            return str(value_wrapper.get_date())
-        elif value_wrapper.is_datetime():
-            return str(value_wrapper.get_datetime())
-        elif value_wrapper.is_empty():
-            return ""
-        elif value_wrapper.is_null():
-            return "NULL"
-        else:
-            # Try to get as string representation
-            return str(value_wrapper)
+        
+        # Last resort: convert to string
+        return str(value_wrapper)
+        
     except Exception as e:
-        return f"Error: {str(e)}"
+        # Return a string representation for debugging
+        return f"[ValueWrapper: {type(value_wrapper).__name__}]"
 
 def initialize_nebula_connection():
     """Initialize Nebula Graph connection"""
@@ -153,7 +164,7 @@ def initialize_nebula_connection():
         return False
 
 def fetch_available_spaces():
-    """Fetch list of available graph spaces"""
+    """Fetch list of available graph spaces - Fixed version"""
     if not st.session_state.session:
         return []
     
@@ -161,23 +172,77 @@ def fetch_available_spaces():
         result = st.session_state.session.execute("SHOW SPACES")
         if result.is_succeeded():
             spaces = []
-            for record in result:
-                # The space name is typically in the first column of the result
-                # We need to properly extract it from the ValueWrapper
-                if record.values():
-                    # Get the first value from the record
-                    value_wrapper = record.values()[0]
-                    space_name = get_value_as_string(value_wrapper)
-                    if space_name and space_name != "NULL" and not space_name.startswith("Error"):
-                        spaces.append(space_name)
+            
+            # Debug: check what we got
+            st.write(f"SHOW SPACES returned {result.row_size()} rows")
+            
+            # Get column names
+            columns = result.keys()
+            st.write(f"Columns: {columns}")
+            
+            for i, record in enumerate(result):
+                try:
+                    # Try different approaches to get the space name
+                    values = record.values()
+                    
+                    # Approach 1: Try to get first column value
+                    if values and len(values) > 0:
+                        first_value = values[0]
+                        
+                        # Debug: print the value object
+                        st.write(f"Row {i}, first value type: {type(first_value)}")
+                        
+                        # Try multiple ways to extract the value
+                        space_name = None
+                        
+                        # Method 1: Try get_as_string
+                        if hasattr(first_value, 'get_as_string'):
+                            space_name = first_value.get_as_string()
+                        
+                        # Method 2: Try direct attribute access
+                        elif hasattr(first_value, '_value'):
+                            val = first_value._value
+                            if hasattr(val, 'get_sVal'):
+                                space_name = val.get_sVal()
+                        
+                        # Method 3: Try to convert to string and parse
+                        else:
+                            str_repr = str(first_value)
+                            # Try to extract space name from string representation
+                            if '[' in str_repr and ']' in str_repr:
+                                # Format might be like: [b'graph_space']
+                                start = str_repr.find('[') + 1
+                                end = str_repr.find(']')
+                                if start < end:
+                                    content = str_repr[start:end]
+                                    # Remove b' prefix and ' suffix if present
+                                    if content.startswith("b'"):
+                                        space_name = content[2:-1]
+                                    elif content.startswith('b"'):
+                                        space_name = content[2:-1]
+                                    else:
+                                        space_name = content
+                            else:
+                                space_name = str_repr
+                        
+                        if space_name and space_name not in ['NULL', 'None', '']:
+                            spaces.append(space_name)
+                            st.write(f"Found space: {space_name}")
+                            
+                except Exception as e:
+                    st.write(f"Error processing row {i}: {str(e)}")
+                    continue
             
             st.session_state.available_spaces = spaces
+            st.write(f"Total spaces found: {len(spaces)}")
             return spaces
         else:
             st.error(f"Failed to fetch spaces: {result.error_msg()}")
             return []
     except Exception as e:
         st.error(f"Failed to fetch spaces: {str(e)}")
+        st.write("Full traceback:")
+        st.code(traceback.format_exc())
         return []
 
 def switch_space(space_name):
@@ -288,7 +353,7 @@ def check_query_requires_space(query):
     return True
 
 def result_to_dataframe(result):
-    """Convert Nebula query result to DataFrame"""
+    """Convert Nebula query result to DataFrame - Fixed version"""
     if not result or not result.is_succeeded():
         return None
     
@@ -307,11 +372,63 @@ def result_to_dataframe(result):
             rows.append(row)
         
         # Create DataFrame
-        df = pd.DataFrame(rows, columns=column_names)
-        return df
+        if rows and column_names:
+            df = pd.DataFrame(rows, columns=column_names)
+            return df
+        else:
+            return pd.DataFrame()  # Return empty DataFrame
         
     except Exception as e:
         st.error(f"Result conversion error: {str(e)}")
+        st.code(traceback.format_exc())
+        return None
+
+def display_result_table(result):
+    """Display result in a simple table format - Alternative approach"""
+    if not result or not result.is_succeeded():
+        return
+    
+    try:
+        # Get column names
+        columns = result.keys()
+        
+        # Create data rows
+        data = []
+        for record in result:
+            row = {}
+            for i, value_wrapper in enumerate(record.values()):
+                col_name = columns[i] if i < len(columns) else f"col_{i}"
+                
+                # Try to extract value
+                try:
+                    if hasattr(value_wrapper, 'get_as_string'):
+                        row[col_name] = value_wrapper.get_as_string()
+                    elif hasattr(value_wrapper, '_value'):
+                        val = value_wrapper._value
+                        if hasattr(val, 'get_sVal'):
+                            row[col_name] = val.get_sVal()
+                        elif hasattr(val, 'get_iVal'):
+                            row[col_name] = str(val.get_iVal())
+                        else:
+                            row[col_name] = str(value_wrapper)
+                    else:
+                        row[col_name] = str(value_wrapper)
+                except:
+                    row[col_name] = str(value_wrapper)
+            
+            data.append(row)
+        
+        # Display as DataFrame
+        if data:
+            df = pd.DataFrame(data)
+            st.dataframe(df, use_container_width=True)
+            return df
+        else:
+            st.info("No data returned")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error displaying result: {str(e)}")
         return None
 
 def visualize_graph_from_dataframe(df):
@@ -461,8 +578,9 @@ with st.sidebar:
         
         # Refresh spaces button
         if st.button("🔄 Refresh Spaces", use_container_width=True):
-            fetch_available_spaces()
-            st.rerun()
+            with st.spinner("Fetching spaces..."):
+                fetch_available_spaces()
+                st.rerun()
         
         # Show available spaces
         if st.session_state.available_spaces:
@@ -570,15 +688,12 @@ with tab1:
                 if result.is_succeeded():
                     st.success("Query executed successfully!")
                     
-                    # Convert to DataFrame for display
-                    df = result_to_dataframe(result)
+                    # Try to display result using our table function first
+                    df = display_result_table(result)
                     
                     if df is not None and not df.empty:
                         # Display statistics
                         st.info(f"Returned {len(df)} rows, {len(df.columns)} columns")
-                        
-                        # Display data table
-                        st.dataframe(df, use_container_width=True)
                         
                         # Save result for visualization
                         st.session_state.last_result_df = df
@@ -588,7 +703,7 @@ with tab1:
                             st.json(df.to_dict(orient='records'))
                     else:
                         st.info("Query succeeded but no data returned")
-                        if result.comment():
+                        if hasattr(result, 'comment') and result.comment():
                             st.write(f"Message: {result.comment()}")
                 else:
                     error_msg = result.error_msg()
@@ -735,64 +850,55 @@ st.divider()
 st.caption("Nebula Graph Query Tool | Using nGQL Query Language | Data Visualization")
 
 # Usage tips
-with st.expander("💡 Usage Tips & Space Management"):
+with st.expander("💡 Debug Information & Tips"):
     st.markdown("""
-    ### Getting Started Guide
+    ### Debug Information
     
-    1. **Connect First**: Connect to Nebula Graph using the sidebar (default: 127.0.0.1:9669, root/nebula)
-    2. **Check Spaces**: After connecting, click "Refresh Spaces" to see available spaces
-    3. **Create Space**: If no spaces exist, use:
+    If you're having issues with the ValueWrapper object:
+    
+    1. **Check your nebula-python version**:
+       ```bash
+       pip show nebula3-python
+       ```
+    
+    2. **Common methods on ValueWrapper**:
+       - `get_as_string()` - For newer versions
+       - `_value.get_sVal()` - For accessing underlying value
+       - `cast_string()` - Alternative method
+       - Direct string conversion: `str(value_wrapper)`
+    
+    3. **Test with simple queries first**:
+       ```sql
+       SHOW HOSTS  -- Should always work
+       SHOW SPACES -- Might need parsing
+       ```
+    
+    ### Manual Space Management
+    
+    If automatic space detection fails, you can manually:
+    
+    1. **Create a space**:
        ```sql
        CREATE SPACE test_space(vid_type=FIXED_STRING(30))
        ```
-    4. **Select Space**: Choose your space from the dropdown
-    5. **Start Querying**: Now you can run queries!
     
-    ### Common Commands
+    2. **Switch to it**:
+       ```sql
+       USE test_space
+       ```
     
-    ```sql
-    -- List all spaces
-    SHOW SPACES
-    
-    -- Create a space
-    CREATE SPACE my_space(vid_type=FIXED_STRING(30))
-    
-    -- Switch space
-    USE my_space
-    
-    -- Show schema (after switching to a space)
-    SHOW TAGS
-    SHOW EDGES
-    
-    -- Simple queries
-    MATCH (v) RETURN v LIMIT 10
-    MATCH ()-[e]->() RETURN e LIMIT 10
-    ```
-    
-    ### Troubleshooting
-    
-    - **"space was not chosen"**: Select a space or use `USE space_name;`
-    - **Connection failed**: Check if Nebula Graph is running on the specified address/port
-    - **No spaces shown**: You may need to create a space first
+    3. **Then run your queries**
     """)
 
-# Add space creation helper
-with st.expander("🔧 Space Creation Helper"):
-    space_name = st.text_input("New Space Name", placeholder="my_graph_space", key="new_space_name")
-    vid_type = st.selectbox("VID Type", ["FIXED_STRING(30)", "INT64", "FIXED_STRING(64)"], key="vid_type_select")
+# Add manual space input option
+with st.expander("🔧 Manual Space Management"):
+    manual_space = st.text_input("Enter Space Name", placeholder="graph_space")
     
-    if space_name:
-        create_command = f"CREATE SPACE IF NOT EXISTS {space_name}(vid_type={vid_type})"
-        st.code(create_command, language="sql")
-        
-        if st.button("Execute CREATE SPACE Command", use_container_width=True):
-            if st.session_state.session:
-                result = execute_query(create_command)
-                if result and result.is_succeeded():
-                    st.success(f"Space '{space_name}' created successfully!")
-                    # Wait and refresh spaces
-                    time.sleep(2)
-                    fetch_available_spaces()
-                    st.rerun()
-            else:
-                st.error("Not connected to Nebula Graph")
+    if manual_space:
+        if st.button(f"Manually switch to {manual_space}", use_container_width=True):
+            if switch_space(manual_space):
+                st.success(f"Manually switched to space: {manual_space}")
+                # Add to available spaces if not already there
+                if manual_space not in st.session_state.available_spaces:
+                    st.session_state.available_spaces.append(manual_space)
+                st.rerun()
