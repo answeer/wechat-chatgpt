@@ -4,8 +4,10 @@ import plotly.graph_objects as go
 import networkx as nx
 from datetime import datetime
 import time
+import re
 from nebula3.gclient.net import ConnectionPool
 from nebula3.Config import Config
+from nebula3.data.DataObject import Vertex, Edge, ValueWrapper
 
 # Page configuration
 st.set_page_config(
@@ -70,56 +72,64 @@ if 'current_space' not in st.session_state:
     st.session_state.current_space = None
 if 'available_spaces' not in st.session_state:
     st.session_state.available_spaces = []
+if 'graph_data' not in st.session_state:
+    st.session_state.graph_data = {'nodes': [], 'edges': []}
 
 def get_value_as_string(value_wrapper):
-    """Extract string value from ValueWrapper object - Fixed version for all data types"""
+    """Extract string value from ValueWrapper object"""
     try:
-        # Get the underlying value
-        val = value_wrapper
+        # Check if it's a ValueWrapper
+        if hasattr(value_wrapper, '_value'):
+            val = value_wrapper._value
+        else:
+            val = value_wrapper
         
-        # First try to check if it's a complex type (Vertex, Edge, Path)
-        if hasattr(val, 'is_vertex'):
-            # It's a Vertex
-            vid = str(val.get_id())
-            tags = []
-            if hasattr(val, 'tags') and val.tags():
-                for tag in val.tags():
-                    tags.append(str(tag))
-            return f"Vertex({vid})[Tags: {', '.join(tags)}]"
+        # Check for Vertex type
+        if isinstance(val, Vertex) or (hasattr(val, 'is_vertex') and val.is_vertex()):
+            vid = val.get_id().as_string() if hasattr(val.get_id(), 'as_string') else str(val.get_id())
+            # Try to get tags/properties
+            properties = {}
+            if hasattr(val, 'properties'):
+                props = val.properties()
+                if props:
+                    for key in props:
+                        prop_val = props[key]
+                        if hasattr(prop_val, 'as_string'):
+                            properties[key] = prop_val.as_string()
+                        else:
+                            properties[key] = str(prop_val)
+            return f"VERTEX:{vid}:{str(properties)}"
         
-        elif hasattr(val, 'is_edge'):
-            # It's an Edge
-            src = str(val.src_vertex_id())
-            dst = str(val.dst_vertex_id())
-            edge_name = str(val.edge_name()) if hasattr(val, 'edge_name') else "edge"
-            return f"Edge[{edge_name}]({src}->{dst})"
+        # Check for Edge type
+        elif isinstance(val, Edge) or (hasattr(val, 'is_edge') and val.is_edge()):
+            src = val.src_vertex_id()
+            dst = val.dst_vertex_id()
+            if hasattr(src, 'as_string'):
+                src_id = src.as_string()
+            else:
+                src_id = str(src)
+            
+            if hasattr(dst, 'as_string'):
+                dst_id = dst.as_string()
+            else:
+                dst_id = str(dst)
+            
+            # Try to get edge properties
+            properties = {}
+            if hasattr(val, 'properties'):
+                props = val.properties()
+                if props:
+                    for key in props:
+                        prop_val = props[key]
+                        if hasattr(prop_val, 'as_string'):
+                            properties[key] = prop_val.as_string()
+                        else:
+                            properties[key] = str(prop_val)
+            
+            edge_type = val.edge_name() if hasattr(val, 'edge_name') else "EDGE"
+            return f"EDGE:{edge_type}:{src_id}->{dst_id}:{str(properties)}"
         
-        elif hasattr(val, 'is_path'):
-            # It's a Path
-            return "Path(...)"  # Simplified for now
-        
-        elif hasattr(val, 'is_list'):
-            # It's a List
-            items = []
-            for item in val.as_list():
-                items.append(get_value_as_string(item))
-            return f"[{', '.join(items)}]"
-        
-        elif hasattr(val, 'is_set'):
-            # It's a Set
-            items = []
-            for item in val.as_set():
-                items.append(get_value_as_string(item))
-            return f"{{{', '.join(items)}}}"
-        
-        elif hasattr(val, 'is_map'):
-            # It's a Map
-            items = []
-            for k, v in val.as_map().items():
-                items.append(f"{k}: {get_value_as_string(v)}")
-            return f"{{{', '.join(items)}}}"
-        
-        # For basic types, use the as_string method
+        # For basic types
         if hasattr(val, 'as_string'):
             result = val.as_string()
         elif hasattr(val, 'get_string'):
@@ -134,22 +144,198 @@ def get_value_as_string(value_wrapper):
             except:
                 return str(result)
         
-        # Clean up the result
-        if isinstance(result, str):
-            # Remove b' prefix if present
-            if result.startswith("b'") and result.endswith("'"):
-                result = result[2:-1]
-            elif result.startswith('b"') and result.endswith('"'):
-                result = result[2:-1]
-        
         return str(result)
         
     except Exception as e:
-        # Fallback: try direct string conversion
-        try:
-            return str(value_wrapper)
-        except:
-            return f"[Error parsing value: {str(e)}]"
+        return f"[Error: {str(e)}]"
+
+def extract_graph_data_from_result(result):
+    """Extract nodes and edges from query result for visualization"""
+    nodes = []
+    edges = []
+    node_ids = set()
+    
+    if not result or not result.is_succeeded():
+        return nodes, edges
+    
+    try:
+        for record in result:
+            for value_wrapper in record.values():
+                # Get the string representation
+                cell_str = get_value_as_string(value_wrapper)
+                
+                # Check for Vertex pattern
+                if cell_str.startswith("VERTEX:"):
+                    # Format: VERTEX:vid:{properties}
+                    parts = cell_str.split(":", 2)
+                    if len(parts) >= 2:
+                        vid = parts[1]
+                        properties = parts[2] if len(parts) > 2 else "{}"
+                        
+                        if vid not in node_ids:
+                            node_ids.add(vid)
+                            nodes.append({
+                                'id': vid,
+                                'label': vid,
+                                'properties': properties,
+                                'type': 'vertex'
+                            })
+                
+                # Check for Edge pattern
+                elif cell_str.startswith("EDGE:"):
+                    # Format: EDGE:type:src->dst:{properties}
+                    parts = cell_str.split(":", 3)
+                    if len(parts) >= 4:
+                        edge_type = parts[1]
+                        src_dst_part = parts[2]
+                        properties = parts[3] if len(parts) > 3 else "{}"
+                        
+                        # Parse src->dst
+                        if '->' in src_dst_part:
+                            src, dst = src_dst_part.split('->')
+                            
+                            # Add source node if not already added
+                            if src not in node_ids:
+                                node_ids.add(src)
+                                nodes.append({
+                                    'id': src,
+                                    'label': src,
+                                    'properties': '{}',
+                                    'type': 'vertex'
+                                })
+                            
+                            # Add destination node if not already added
+                            if dst not in node_ids:
+                                node_ids.add(dst)
+                                nodes.append({
+                                    'id': dst,
+                                    'label': dst,
+                                    'properties': '{}',
+                                    'type': 'vertex'
+                                })
+                            
+                            # Add edge
+                            edges.append({
+                                'source': src,
+                                'target': dst,
+                                'type': edge_type,
+                                'properties': properties,
+                                'label': f"{edge_type}: {src}->{dst}"
+                            })
+        
+        return nodes, edges
+        
+    except Exception as e:
+        st.error(f"Error extracting graph data: {str(e)}")
+        return nodes, edges
+
+def create_graph_visualization(nodes, edges):
+    """Create Plotly graph visualization from nodes and edges"""
+    if not nodes:
+        return None
+    
+    try:
+        # Create NetworkX graph
+        G = nx.Graph()
+        
+        # Add nodes
+        for node in nodes:
+            G.add_node(node['id'], **node)
+        
+        # Add edges
+        for edge in edges:
+            G.add_edge(edge['source'], edge['target'], **edge)
+        
+        # Use spring layout for node positions
+        pos = nx.spring_layout(G, seed=42, k=1, iterations=50)
+        
+        # Create edge traces
+        edge_x = []
+        edge_y = []
+        edge_text = []
+        
+        for edge in G.edges(data=True):
+            x0, y0 = pos[edge[0]]
+            x1, y1 = pos[edge[1]]
+            edge_x.extend([x0, x1, None])
+            edge_y.extend([y0, y1, None])
+            
+            # Add edge label
+            edge_data = edge[2]
+            edge_label = edge_data.get('label', f"{edge[0]}->{edge[1]}")
+            edge_text.append(edge_label)
+        
+        edge_trace = go.Scatter(
+            x=edge_x, y=edge_y,
+            line=dict(width=1, color='#888'),
+            hoverinfo='text',
+            text=edge_text,
+            mode='lines',
+            name='Edges'
+        )
+        
+        # Create node trace
+        node_x = []
+        node_y = []
+        node_text = []
+        node_colors = []
+        
+        for i, node in enumerate(G.nodes(data=True)):
+            x, y = pos[node[0]]
+            node_x.append(x)
+            node_y.append(y)
+            
+            # Create hover text
+            node_data = node[1]
+            hover_text = f"ID: {node[0]}"
+            if 'properties' in node_data and node_data['properties'] != '{}':
+                hover_text += f"\nProperties: {node_data['properties']}"
+            node_text.append(hover_text)
+            
+            # Assign color based on degree (connectivity)
+            node_colors.append(G.degree(node[0]))
+        
+        node_trace = go.Scatter(
+            x=node_x, y=node_y,
+            mode='markers+text',
+            text=[n[0] for n in G.nodes(data=True)],
+            textposition="bottom center",
+            hovertext=node_text,
+            hoverinfo='text',
+            marker=dict(
+                showscale=True,
+                colorscale='Viridis',
+                size=20,
+                color=node_colors,
+                colorbar=dict(
+                    thickness=15,
+                    title='Node Degree',
+                    xanchor='left',
+                    titleside='right'
+                ),
+                line=dict(width=2, color='white')
+            ),
+            name='Nodes'
+        )
+        
+        # Create figure
+        fig = go.Figure(data=[edge_trace, node_trace],
+                       layout=go.Layout(
+                           title='Graph Visualization',
+                           titlefont_size=16,
+                           showlegend=True,
+                           hovermode='closest',
+                           margin=dict(b=20, l=5, r=5, t=40),
+                           xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                           yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                           plot_bgcolor='white'
+                       ))
+        
+        return fig
+        
+    except Exception as e:
+        st.error(f"Error creating graph visualization: {str(e)}")
+        return None
 
 def initialize_nebula_connection():
     """Initialize Nebula Graph connection"""
@@ -206,12 +392,10 @@ def fetch_available_spaces():
             
             for record in result:
                 try:
-                    # Get the first column value which should be the space name
                     if record.values():
                         value_wrapper = record.values()[0]
                         space_name = get_value_as_string(value_wrapper)
                         
-                        # Clean up the space name
                         if space_name and space_name != "NULL" and space_name != "None":
                             spaces.append(space_name)
                             
@@ -368,150 +552,6 @@ def display_result_table(result):
         st.error(f"Error displaying result: {str(e)}")
         return None
 
-def visualize_graph_from_dataframe(df):
-    """Create graph visualization from DataFrame"""
-    if df is None or df.empty:
-        return None
-    
-    try:
-        # Try to identify nodes and edges from the data
-        nodes = set()
-        edges = []
-        node_labels = {}
-        
-        for idx, row in df.iterrows():
-            for col in df.columns:
-                cell_value = str(row[col])
-                
-                # Look for Vertex patterns
-                if "Vertex(" in cell_value:
-                    # Extract vertex ID from Vertex(id) pattern
-                    try:
-                        if "Vertex(" in cell_value and ")" in cell_value:
-                            vertex_part = cell_value.split("Vertex(")[1].split(")")[0]
-                            node_id = vertex_part.split("[")[0].strip()  # Get ID part
-                            if node_id:
-                                nodes.add(node_id)
-                                
-                                # Try to extract tags for labeling
-                                if "Tags:" in cell_value:
-                                    tags_part = cell_value.split("Tags:")[1].split("]")[0]
-                                    node_labels[node_id] = f"Vertex: {node_id}\nTags: {tags_part}"
-                                else:
-                                    node_labels[node_id] = f"Vertex: {node_id}"
-                    except:
-                        pass
-                
-                # Look for Edge patterns
-                elif "Edge[" in cell_value and "]->" in cell_value:
-                    try:
-                        # Extract src and dst from Edge[type](src->dst) pattern
-                        if "]->" in cell_value:
-                            edge_part = cell_value.split("]->")[0]
-                            src_part = edge_part.split("(")[-1]
-                            
-                            dst_part = cell_value.split("]->")[1].split(")")[0]
-                            
-                            if src_part and dst_part:
-                                src = src_part.strip()
-                                dst = dst_part.strip()
-                                edges.append((src, dst, cell_value))
-                                nodes.add(src)
-                                nodes.add(dst)
-                    except:
-                        pass
-        
-        # If we found nodes, create a graph
-        if nodes:
-            G = nx.Graph()
-            
-            # Add nodes
-            for node in nodes:
-                G.add_node(node, label=node_labels.get(node, node))
-            
-            # Add edges
-            for src, dst, label in edges:
-                G.add_edge(src, dst, label=label)
-            
-            # Create positions for nodes
-            pos = nx.spring_layout(G, seed=42)
-            
-            # Create Plotly figure
-            edge_x = []
-            edge_y = []
-            edge_labels = []
-            
-            for edge in G.edges():
-                x0, y0 = pos[edge[0]]
-                x1, y1 = pos[edge[1]]
-                edge_x.extend([x0, x1, None])
-                edge_y.extend([y0, y1, None])
-                
-                # Find the edge label
-                edge_label = ""
-                for src_e, dst_e, label_e in edges:
-                    if src_e == edge[0] and dst_e == edge[1]:
-                        edge_label = label_e
-                        break
-                
-                edge_labels.append(edge_label)
-            
-            edge_trace = go.Scatter(
-                x=edge_x, y=edge_y,
-                line=dict(width=2, color='#888'),
-                hoverinfo='text',
-                mode='lines',
-                name='Edges'
-            )
-            
-            node_x = []
-            node_y = []
-            node_text = []
-            node_colors = []
-            
-            for i, node in enumerate(G.nodes()):
-                x, y = pos[node]
-                node_x.append(x)
-                node_y.append(y)
-                node_text.append(node_labels.get(node, node))
-                node_colors.append(i)  # Color by index
-            
-            node_trace = go.Scatter(
-                x=node_x, y=node_y,
-                mode='markers+text',
-                hoverinfo='text',
-                text=[str(n) for n in G.nodes()],
-                textposition="bottom center",
-                hovertext=node_text,
-                marker=dict(
-                    showscale=True,
-                    colorscale='Viridis',
-                    size=25,
-                    color=node_colors,
-                    line=dict(width=2, color='white')
-                ),
-                name='Nodes'
-            )
-            
-            fig = go.Figure(data=[edge_trace, node_trace],
-                           layout=go.Layout(
-                               title='Graph Visualization',
-                               titlefont_size=16,
-                               showlegend=True,
-                               hovermode='closest',
-                               margin=dict(b=20,l=5,r=5,t=40),
-                               xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                               yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
-                           ))
-            
-            return fig
-        else:
-            return None
-            
-    except Exception as e:
-        st.warning(f"Could not create graph visualization: {str(e)}")
-        return None
-
 # Sidebar - Connection Configuration
 with st.sidebar:
     st.header("Connection Configuration")
@@ -538,6 +578,7 @@ with st.sidebar:
                 st.session_state.connection_pool = None
                 st.session_state.current_space = None
                 st.session_state.available_spaces = []
+                st.session_state.graph_data = {'nodes': [], 'edges': []}
                 st.info("Disconnected")
     
     st.divider()
@@ -592,8 +633,9 @@ with st.sidebar:
         "Create Space": "CREATE SPACE IF NOT EXISTS test_space(vid_type=FIXED_STRING(30));",
         "Show Tags": "SHOW TAGS;",
         "Show Edges": "SHOW EDGES;",
-        "Simple MATCH": "MATCH (v) RETURN v LIMIT 10;",
-        "Count Vertices": "MATCH (v) RETURN count(v) AS vertex_count;"
+        "Find Vertices": "MATCH (v) RETURN v LIMIT 10;",
+        "Find Edges": "MATCH ()-[e]->() RETURN e LIMIT 10;",
+        "Find Paths": "MATCH p=(v1)-[e*1..2]->(v2) RETURN p LIMIT 5;"
     }
     
     selected_example = st.selectbox("Choose an example:", list(example_queries.keys()))
@@ -620,7 +662,7 @@ with st.sidebar:
     st.divider()
 
 # Main Interface
-tab1, tab2, tab3 = st.tabs(["Query Editor", "Data Visualization", "System Status"])
+tab1, tab2 = st.tabs(["Query Editor & Results", "Graph Visualization"])
 
 with tab1:
     st.markdown('<div class="query-box">', unsafe_allow_html=True)
@@ -645,6 +687,9 @@ with tab1:
         if st.button("Clear Results", use_container_width=True):
             if 'last_result_df' in st.session_state:
                 del st.session_state.last_result_df
+            if 'last_result' in st.session_state:
+                del st.session_state.last_result
+            st.session_state.graph_data = {'nodes': [], 'edges': []}
     with col3:
         space_info = st.empty()
         if st.session_state.current_space:
@@ -661,6 +706,9 @@ with tab1:
                 if result.is_succeeded():
                     st.success("Query executed successfully!")
                     
+                    # Store the result for later use
+                    st.session_state.last_result = result
+                    
                     # Display result using our table function
                     df = display_result_table(result)
                     
@@ -674,9 +722,26 @@ with tab1:
                         # Save result for visualization
                         st.session_state.last_result_df = df
                         
-                        # Show raw data
-                        with st.expander("View Raw Data"):
-                            st.json(df.to_dict(orient='records'))
+                        # Extract graph data for visualization
+                        nodes, edges = extract_graph_data_from_result(result)
+                        st.session_state.graph_data = {'nodes': nodes, 'edges': edges}
+                        
+                        # Show graph data info
+                        if nodes:
+                            st.success(f"Found {len(nodes)} nodes and {len(edges)} edges for visualization")
+                            
+                            # Show preview of extracted data
+                            with st.expander("View Extracted Graph Data"):
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.write("Nodes (first 5):")
+                                    for node in nodes[:5]:
+                                        st.code(f"ID: {node['id']}")
+                                with col2:
+                                    if edges:
+                                        st.write("Edges (first 5):")
+                                        for edge in edges[:5]:
+                                            st.code(f"{edge['source']} -> {edge['target']}")
                     else:
                         st.info("Query succeeded but no data returned")
                         if hasattr(result, 'comment') and result.comment():
@@ -693,148 +758,110 @@ with tab1:
                         st.markdown("3. Create a new space with `CREATE SPACE your_space_name(...)`")
 
 with tab2:
-    st.header("Data Visualization")
+    st.header("Graph Visualization")
     
-    if 'last_result_df' in st.session_state and st.session_state.last_result_df is not None:
-        df = st.session_state.last_result_df
+    if st.session_state.graph_data and st.session_state.graph_data['nodes']:
+        nodes = st.session_state.graph_data['nodes']
+        edges = st.session_state.graph_data['edges']
         
-        # Visualization type selection
+        # Display graph statistics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Nodes", len(nodes))
+        with col2:
+            st.metric("Total Edges", len(edges))
+        with col3:
+            if edges:
+                avg_degree = (2 * len(edges)) / len(nodes) if nodes else 0
+                st.metric("Avg Degree", f"{avg_degree:.2f}")
+        
+        # Visualization options
         viz_type = st.radio(
-            "Select Visualization Type",
-            ["Table View", "Graph View", "Statistics"],
+            "Visualization Type",
+            ["Force-Directed Graph", "Circular Layout", "Kamada-Kawai Layout"],
             horizontal=True
         )
         
-        if viz_type == "Table View":
-            # Interactive data table
-            edited_df = st.data_editor(df, use_container_width=True)
-            
-            # Data export options
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                if st.button("Export as CSV"):
-                    csv = df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="Download CSV",
-                        data=csv,
-                        file_name=f"nebula_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
-                    )
+        # Create and display the graph
+        fig = create_graph_visualization(nodes, edges)
         
-        elif viz_type == "Graph View":
-            fig = visualize_graph_from_dataframe(df)
-            if fig:
-                st.plotly_chart(fig, use_container_width=True)
-                st.info("Graph visualization showing Vertex and Edge relationships")
-            else:
-                st.info("No graph data found in results. Showing table view instead:")
-                st.dataframe(df, use_container_width=True)
+        if fig:
+            # Update layout based on selection
+            if viz_type == "Circular Layout":
+                # For circular layout, we'd need to recalculate positions
+                st.info("Note: Layout type change requires recalculating positions (coming soon)")
             
-        elif viz_type == "Statistics":
-            col1, col2 = st.columns(2)
+            st.plotly_chart(fig, use_container_width=True)
             
-            with col1:
-                st.subheader("Data Overview")
-                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.metric("Total Rows", len(df))
-                st.metric("Total Columns", len(df.columns))
-                st.markdown('</div>', unsafe_allow_html=True)
+            # Graph controls
+            with st.expander("Graph Controls"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    node_size = st.slider("Node Size", 10, 50, 20)
+                with col2:
+                    edge_width = st.slider("Edge Width", 1, 10, 1)
+            
+            # Node and edge details
+            if nodes:
+                st.subheader("Node Details")
+                selected_node = st.selectbox("Select a node to view details", 
+                                           [n['id'] for n in nodes])
                 
-                # Data type statistics
-                st.subheader("Data Types")
-                type_counts = df.dtypes.value_counts()
-                if not type_counts.empty:
-                    st.bar_chart(type_counts)
-                else:
-                    st.info("No type information available")
+                if selected_node:
+                    node_info = next((n for n in nodes if n['id'] == selected_node), None)
+                    if node_info:
+                        st.write(f"**Node ID:** {node_info['id']}")
+                        st.write(f"**Properties:** {node_info['properties']}")
+                        
+                        # Find connected edges
+                        connected_edges = [e for e in edges if e['source'] == selected_node or e['target'] == selected_node]
+                        if connected_edges:
+                            st.write(f"**Connected Edges ({len(connected_edges)}):**")
+                            for edge in connected_edges:
+                                direction = "outgoing" if edge['source'] == selected_node else "incoming"
+                                st.write(f"- {direction}: {edge['source']} -> {edge['target']} ({edge['type']})")
             
+            # Export options
+            st.subheader("Export Options")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Export as PNG"):
+                    st.info("Export feature requires additional setup. Coming soon!")
             with col2:
-                st.subheader("Column Information")
-                column_info = []
-                for col in df.columns:
-                    col_type = str(df[col].dtype)
-                    non_null = df[col].notnull().sum()
-                    unique_count = df[col].nunique()
-                    column_info.append({
-                        'Column': col,
-                        'Type': col_type,
-                        'Non-Null': non_null,
-                        'Unique': unique_count
-                    })
-                if column_info:
-                    st.dataframe(pd.DataFrame(column_info), use_container_width=True)
-    
+                if st.button("Export Graph Data"):
+                    graph_json = {
+                        'nodes': nodes,
+                        'edges': edges,
+                        'metadata': {
+                            'space': st.session_state.current_space,
+                            'timestamp': datetime.now().isoformat()
+                        }
+                    }
+                    st.download_button(
+                        label="Download JSON",
+                        data=str(graph_json),
+                        file_name=f"graph_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json"
+                    )
     else:
-        st.info("Please execute a query in the Query Editor tab first")
+        st.info("No graph data available. Please execute a graph query first.")
+        
+        # Suggested queries for graph visualization
+        st.markdown("### Try these queries to get graph data:")
+        st.code("""
+# Find vertices
+MATCH (v) RETURN v LIMIT 10;
 
-with tab3:
-    st.header("System Status")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Connection Status")
-        status_card = st.container()
-        with status_card:
-            if st.session_state.session:
-                st.success("Connected")
-                st.metric("Current Space", st.session_state.current_space or "Not selected")
-                if st.session_state.current_space:
-                    st.markdown(f"Space selected: `{st.session_state.current_space}`")
-            else:
-                st.error("Not connected")
-        
-        st.subheader("Query Statistics")
-        if st.session_state.query_history:
-            total_queries = len(st.session_state.query_history)
-            successful_queries = sum(1 for q in st.session_state.query_history if q['success'])
-            success_rate = (successful_queries / total_queries * 100) if total_queries > 0 else 0
-            
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Total Queries", total_queries)
-            st.metric("Success Rate", f"{success_rate:.1f}%")
-            st.markdown('</div>', unsafe_allow_html=True)
-    
-    with col2:
-        st.subheader("System Information")
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.write(f"Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        st.write(f"Streamlit Version: {st.__version__}")
-        st.write(f"Available Spaces: {len(st.session_state.available_spaces)}")
-        
-        if st.session_state.available_spaces:
-            spaces_display = []
-            for space in st.session_state.available_spaces:
-                if isinstance(space, bytes):
-                    try:
-                        spaces_display.append(space.decode('utf-8'))
-                    except:
-                        spaces_display.append(str(space))
-                else:
-                    spaces_display.append(str(space))
-            
-            if spaces_display:
-                st.write("Spaces:", ", ".join(spaces_display[:5]))
-                if len(spaces_display) > 5:
-                    st.write(f"... and {len(spaces_display) - 5} more")
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Quick actions
-        st.subheader("Quick Actions")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Refresh Spaces", use_container_width=True):
-                if st.session_state.session:
-                    fetch_available_spaces()
-                    st.rerun()
-                else:
-                    st.error("Not connected")
-        
-        with col2:
-            if st.button("Clear History", use_container_width=True):
-                st.session_state.query_history = []
-                st.rerun()
+# Find edges
+MATCH ()-[e]->() RETURN e LIMIT 10;
+
+# Find paths
+MATCH p=(v1)-[e*1..2]->(v2) RETURN p LIMIT 5;
+
+# Find connected vertices
+MATCH (v1)-[e]->(v2) RETURN v1, e, v2 LIMIT 10;
+        """)
 
 # Footer
 st.divider()
-st.caption("Nebula Graph Query Tool | Using nGQL Query Language | Data Visualization")
+st.caption("Nebula Graph Query Tool | Using nGQL Query Language | Interactive Graph Visualization")
