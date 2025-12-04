@@ -7,7 +7,6 @@ import time
 from nebula3.gclient.net import ConnectionPool
 from nebula3.Config import Config
 
-
 # Page configuration
 st.set_page_config(
     page_title="Nebula Graph Query Tool",
@@ -73,54 +72,84 @@ if 'available_spaces' not in st.session_state:
     st.session_state.available_spaces = []
 
 def get_value_as_string(value_wrapper):
-    """Extract string value from ValueWrapper object - Fixed version"""
+    """Extract string value from ValueWrapper object - Fixed version for all data types"""
     try:
-        # Try get_as_string method first (for newer versions)
-        if hasattr(value_wrapper, 'get_as_string'):
-            result = value_wrapper.get_as_string()
-            # If result is bytes, decode it
-            if isinstance(result, bytes):
+        # Get the underlying value
+        val = value_wrapper
+        
+        # First try to check if it's a complex type (Vertex, Edge, Path)
+        if hasattr(val, 'is_vertex'):
+            # It's a Vertex
+            vid = str(val.get_id())
+            tags = []
+            if hasattr(val, 'tags') and val.tags():
+                for tag in val.tags():
+                    tags.append(str(tag))
+            return f"Vertex({vid})[Tags: {', '.join(tags)}]"
+        
+        elif hasattr(val, 'is_edge'):
+            # It's an Edge
+            src = str(val.src_vertex_id())
+            dst = str(val.dst_vertex_id())
+            edge_name = str(val.edge_name()) if hasattr(val, 'edge_name') else "edge"
+            return f"Edge[{edge_name}]({src}->{dst})"
+        
+        elif hasattr(val, 'is_path'):
+            # It's a Path
+            return "Path(...)"  # Simplified for now
+        
+        elif hasattr(val, 'is_list'):
+            # It's a List
+            items = []
+            for item in val.as_list():
+                items.append(get_value_as_string(item))
+            return f"[{', '.join(items)}]"
+        
+        elif hasattr(val, 'is_set'):
+            # It's a Set
+            items = []
+            for item in val.as_set():
+                items.append(get_value_as_string(item))
+            return f"{{{', '.join(items)}}}"
+        
+        elif hasattr(val, 'is_map'):
+            # It's a Map
+            items = []
+            for k, v in val.as_map().items():
+                items.append(f"{k}: {get_value_as_string(v)}")
+            return f"{{{', '.join(items)}}}"
+        
+        # For basic types, use the as_string method
+        if hasattr(val, 'as_string'):
+            result = val.as_string()
+        elif hasattr(val, 'get_string'):
+            result = val.get_string()
+        else:
+            result = str(val)
+        
+        # Handle bytes
+        if isinstance(result, bytes):
+            try:
                 return result.decode('utf-8')
-            return result
+            except:
+                return str(result)
         
-        # Try cast_string method
-        if hasattr(value_wrapper, 'cast_string'):
-            result = value_wrapper.cast_string()
-            if isinstance(result, bytes):
-                return result.decode('utf-8')
-            return result
+        # Clean up the result
+        if isinstance(result, str):
+            # Remove b' prefix if present
+            if result.startswith("b'") and result.endswith("'"):
+                result = result[2:-1]
+            elif result.startswith('b"') and result.endswith('"'):
+                result = result[2:-1]
         
-        # Try to get the value directly
-        if hasattr(value_wrapper, '_value'):
-            val = value_wrapper._value
-            if hasattr(val, 'get_sVal'):
-                result = val.get_sVal()
-                if isinstance(result, bytes):
-                    return result.decode('utf-8')
-                return result
-            elif hasattr(val, 'get_iVal'):
-                return str(val.get_iVal())
-        
-        # For older versions of nebula-python
-        if hasattr(value_wrapper, 'get_string'):
-            result = value_wrapper.get_string()
-            if isinstance(result, bytes):
-                return result.decode('utf-8')
-            return result
-        
-        # Last resort: convert to string and handle bytes
-        result = str(value_wrapper)
-        if result.startswith("b'") and result.endswith("'"):
-            # Remove b' prefix and ' suffix
-            return result[2:-1]
-        elif result.startswith('b"') and result.endswith('"'):
-            # Remove b" prefix and " suffix
-            return result[2:-1]
-        return result
+        return str(result)
         
     except Exception as e:
-        # Return a string representation for debugging
-        return f"[Error: {str(e)}]"
+        # Fallback: try direct string conversion
+        try:
+            return str(value_wrapper)
+        except:
+            return f"[Error parsing value: {str(e)}]"
 
 def initialize_nebula_connection():
     """Initialize Nebula Graph connection"""
@@ -175,46 +204,18 @@ def fetch_available_spaces():
         if result.is_succeeded():
             spaces = []
             
-            # Get column names for debugging
-            columns = result.keys()
-            
-            for i, record in enumerate(result):
+            for record in result:
                 try:
-                    values = record.values()
-                    
-                    # Try to get the space name from the first column
-                    if values and len(values) > 0:
-                        first_value = values[0]
-                        
-                        # Get the value as string (handles bytes automatically)
-                        space_name = get_value_as_string(first_value)
+                    # Get the first column value which should be the space name
+                    if record.values():
+                        value_wrapper = record.values()[0]
+                        space_name = get_value_as_string(value_wrapper)
                         
                         # Clean up the space name
-                        if space_name:
-                            # Remove any quotes or brackets
-                            space_name = space_name.strip()
+                        if space_name and space_name != "NULL" and space_name != "None":
+                            spaces.append(space_name)
                             
-                            # Remove b' prefix if still present
-                            if space_name.startswith("b'") and space_name.endswith("'"):
-                                space_name = space_name[2:-1]
-                            elif space_name.startswith('b"') and space_name.endswith('"'):
-                                space_name = space_name[2:-1]
-                            
-                            # Remove any surrounding quotes
-                            if (space_name.startswith("'") and space_name.endswith("'")) or \
-                               (space_name.startswith('"') and space_name.endswith('"')):
-                                space_name = space_name[1:-1]
-                            
-                            # Only add if it's a valid name
-                            if space_name and space_name not in ['NULL', 'None', '', 'null']:
-                                # Ensure it's a string (not bytes)
-                                if isinstance(space_name, bytes):
-                                    space_name = space_name.decode('utf-8')
-                                
-                                spaces.append(space_name)
-                                
                 except Exception as e:
-                    # Skip this row if there's an error
                     continue
             
             st.session_state.available_spaces = spaces
@@ -349,12 +350,8 @@ def display_result_table(result):
             for i, value_wrapper in enumerate(record.values()):
                 col_name = columns[i] if i < len(columns) else f"col_{i}"
                 
-                # Get the value as string
+                # Get the value as string using our fixed function
                 cell_value = get_value_as_string(value_wrapper)
-                
-                # Ensure it's a string (not bytes)
-                if isinstance(cell_value, bytes):
-                    cell_value = cell_value.decode('utf-8')
                 
                 row[col_name] = cell_value
             
@@ -377,40 +374,64 @@ def visualize_graph_from_dataframe(df):
         return None
     
     try:
-        # Try to identify nodes and edges
+        # Try to identify nodes and edges from the data
         nodes = set()
         edges = []
+        node_labels = {}
         
-        # Look for vertex and edge patterns in the data
         for idx, row in df.iterrows():
             for col in df.columns:
                 cell_value = str(row[col])
                 
-                # Check for vertex pattern (e.g., "Vertex(some_id)")
-                if cell_value.startswith("Vertex(") and ")" in cell_value:
-                    node_id = cell_value.split("Vertex(")[1].split(")")[0]
-                    nodes.add(node_id)
+                # Look for Vertex patterns
+                if "Vertex(" in cell_value:
+                    # Extract vertex ID from Vertex(id) pattern
+                    try:
+                        if "Vertex(" in cell_value and ")" in cell_value:
+                            vertex_part = cell_value.split("Vertex(")[1].split(")")[0]
+                            node_id = vertex_part.split("[")[0].strip()  # Get ID part
+                            if node_id:
+                                nodes.add(node_id)
+                                
+                                # Try to extract tags for labeling
+                                if "Tags:" in cell_value:
+                                    tags_part = cell_value.split("Tags:")[1].split("]")[0]
+                                    node_labels[node_id] = f"Vertex: {node_id}\nTags: {tags_part}"
+                                else:
+                                    node_labels[node_id] = f"Vertex: {node_id}"
+                    except:
+                        pass
                 
-                # Check for edge pattern (e.g., "Edge(src->dst)")
-                elif cell_value.startswith("Edge(") and ")" in cell_value:
-                    edge_content = cell_value.split("Edge(")[1].split(")")[0]
-                    if "->" in edge_content:
-                        src, dst = edge_content.split("->")
-                        edges.append((src, dst))
-                        nodes.add(src)
-                        nodes.add(dst)
+                # Look for Edge patterns
+                elif "Edge[" in cell_value and "]->" in cell_value:
+                    try:
+                        # Extract src and dst from Edge[type](src->dst) pattern
+                        if "]->" in cell_value:
+                            edge_part = cell_value.split("]->")[0]
+                            src_part = edge_part.split("(")[-1]
+                            
+                            dst_part = cell_value.split("]->")[1].split(")")[0]
+                            
+                            if src_part and dst_part:
+                                src = src_part.strip()
+                                dst = dst_part.strip()
+                                edges.append((src, dst, cell_value))
+                                nodes.add(src)
+                                nodes.add(dst)
+                    except:
+                        pass
         
-        # If we found nodes and edges, create a graph
+        # If we found nodes, create a graph
         if nodes:
             G = nx.Graph()
             
             # Add nodes
             for node in nodes:
-                G.add_node(node)
+                G.add_node(node, label=node_labels.get(node, node))
             
             # Add edges
-            for src, dst in edges:
-                G.add_edge(src, dst)
+            for src, dst, label in edges:
+                G.add_edge(src, dst, label=label)
             
             # Create positions for nodes
             pos = nx.spring_layout(G, seed=42)
@@ -418,16 +439,27 @@ def visualize_graph_from_dataframe(df):
             # Create Plotly figure
             edge_x = []
             edge_y = []
+            edge_labels = []
+            
             for edge in G.edges():
                 x0, y0 = pos[edge[0]]
                 x1, y1 = pos[edge[1]]
                 edge_x.extend([x0, x1, None])
                 edge_y.extend([y0, y1, None])
+                
+                # Find the edge label
+                edge_label = ""
+                for src_e, dst_e, label_e in edges:
+                    if src_e == edge[0] and dst_e == edge[1]:
+                        edge_label = label_e
+                        break
+                
+                edge_labels.append(edge_label)
             
             edge_trace = go.Scatter(
                 x=edge_x, y=edge_y,
-                line=dict(width=1, color='#888'),
-                hoverinfo='none',
+                line=dict(width=2, color='#888'),
+                hoverinfo='text',
                 mode='lines',
                 name='Edges'
             )
@@ -435,24 +467,28 @@ def visualize_graph_from_dataframe(df):
             node_x = []
             node_y = []
             node_text = []
-            for node in G.nodes():
+            node_colors = []
+            
+            for i, node in enumerate(G.nodes()):
                 x, y = pos[node]
                 node_x.append(x)
                 node_y.append(y)
-                node_text.append(f"Node: {node}")
+                node_text.append(node_labels.get(node, node))
+                node_colors.append(i)  # Color by index
             
             node_trace = go.Scatter(
                 x=node_x, y=node_y,
                 mode='markers+text',
                 hoverinfo='text',
-                text=list(G.nodes()),
+                text=[str(n) for n in G.nodes()],
                 textposition="bottom center",
+                hovertext=node_text,
                 marker=dict(
                     showscale=True,
-                    colorscale='YlGnBu',
-                    size=20,
-                    color=[],
-                    line_width=2
+                    colorscale='Viridis',
+                    size=25,
+                    color=node_colors,
+                    line=dict(width=2, color='white')
                 ),
                 name='Nodes'
             )
@@ -461,7 +497,7 @@ def visualize_graph_from_dataframe(df):
                            layout=go.Layout(
                                title='Graph Visualization',
                                titlefont_size=16,
-                               showlegend=False,
+                               showlegend=True,
                                hovermode='closest',
                                margin=dict(b=20,l=5,r=5,t=40),
                                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
@@ -470,7 +506,6 @@ def visualize_graph_from_dataframe(df):
             
             return fig
         else:
-            # If no graph data found, return None
             return None
             
     except Exception as e:
@@ -497,7 +532,8 @@ with st.sidebar:
         if st.button("Disconnect", use_container_width=True):
             if st.session_state.session:
                 st.session_state.session.release()
-                st.session_state.connection_pool.close()
+                if st.session_state.connection_pool:
+                    st.session_state.connection_pool.close()
                 st.session_state.session = None
                 st.session_state.connection_pool = None
                 st.session_state.current_space = None
@@ -540,11 +576,30 @@ with st.sidebar:
         else:
             st.info("No spaces found. Create a space first.")
             if st.button("Show CREATE SPACE Example", use_container_width=True):
-                st.code("CREATE SPACE test_space(vid_type=FIXED_STRING(30))")
+                st.code("CREATE SPACE IF NOT EXISTS test_space(vid_type=FIXED_STRING(30));")
         
         st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.info("Connect to see available spaces")
+    
+    st.divider()
+    
+    # Query Examples
+    st.header("Query Examples")
+    
+    example_queries = {
+        "Show Spaces": "SHOW SPACES;",
+        "Create Space": "CREATE SPACE IF NOT EXISTS test_space(vid_type=FIXED_STRING(30));",
+        "Show Tags": "SHOW TAGS;",
+        "Show Edges": "SHOW EDGES;",
+        "Simple MATCH": "MATCH (v) RETURN v LIMIT 10;",
+        "Count Vertices": "MATCH (v) RETURN count(v) AS vertex_count;"
+    }
+    
+    selected_example = st.selectbox("Choose an example:", list(example_queries.keys()))
+    if st.button("Load Example"):
+        st.session_state.example_query = example_queries[selected_example]
+        st.rerun()
     
     st.divider()
     
@@ -554,7 +609,7 @@ with st.sidebar:
         for i, record in enumerate(reversed(st.session_state.query_history[-5:])):
             with st.expander(f"{record['timestamp']} - {record['query'][:50]}..."):
                 st.code(record['query'])
-                status = "Success" if record['success'] else "Failed"
+                status = "✅ Success" if record['success'] else "❌ Failed"
                 st.caption(f"Status: {status}")
                 st.caption(f"Time: {record['time']}")
                 if record.get('space'):
@@ -670,6 +725,7 @@ with tab2:
             fig = visualize_graph_from_dataframe(df)
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
+                st.info("Graph visualization showing Vertex and Edge relationships")
             else:
                 st.info("No graph data found in results. Showing table view instead:")
                 st.dataframe(df, use_container_width=True)
@@ -746,21 +802,21 @@ with tab3:
         st.write(f"Streamlit Version: {st.__version__}")
         st.write(f"Available Spaces: {len(st.session_state.available_spaces)}")
         
-        # FIXED: Properly handle bytes in spaces list
         if st.session_state.available_spaces:
-            # Convert all items to strings, handling bytes if needed
-            space_strings = []
+            spaces_display = []
             for space in st.session_state.available_spaces:
                 if isinstance(space, bytes):
                     try:
-                        space_strings.append(space.decode('utf-8'))
+                        spaces_display.append(space.decode('utf-8'))
                     except:
-                        space_strings.append(str(space))
+                        spaces_display.append(str(space))
                 else:
-                    space_strings.append(str(space))
+                    spaces_display.append(str(space))
             
-            # Now we can safely join
-            st.write("Spaces:", ", ".join(space_strings))
+            if spaces_display:
+                st.write("Spaces:", ", ".join(spaces_display[:5]))
+                if len(spaces_display) > 5:
+                    st.write(f"... and {len(spaces_display) - 5} more")
         st.markdown('</div>', unsafe_allow_html=True)
         
         # Quick actions
