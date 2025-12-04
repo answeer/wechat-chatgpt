@@ -55,6 +55,12 @@ st.markdown("""
         border-radius: 10px;
         border: 1px solid #dee2e6;
     }
+    .space-selector {
+        background-color: #e8f4fd;
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 15px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -70,6 +76,8 @@ if 'query_history' not in st.session_state:
     st.session_state.query_history = []
 if 'current_space' not in st.session_state:
     st.session_state.current_space = None
+if 'available_spaces' not in st.session_state:
+    st.session_state.available_spaces = []
 
 def initialize_nebula_connection():
     """Initialize Nebula Graph connection"""
@@ -106,10 +114,52 @@ def initialize_nebula_connection():
         
         st.session_state.connection_pool = connection_pool
         st.session_state.session = session
+        
+        # Fetch available spaces
+        fetch_available_spaces()
+        
         return True
         
     except Exception as e:
         st.error(f"Connection failed: {str(e)}")
+        return False
+
+def fetch_available_spaces():
+    """Fetch list of available graph spaces"""
+    if not st.session_state.session:
+        return []
+    
+    try:
+        result = st.session_state.session.execute("SHOW SPACES")
+        if result.is_succeeded():
+            spaces = []
+            for record in result:
+                # Space name is typically in the first column
+                space_name = record.values()[0].get_string()
+                spaces.append(space_name)
+            st.session_state.available_spaces = spaces
+            return spaces
+        return []
+    except Exception as e:
+        st.error(f"Failed to fetch spaces: {str(e)}")
+        return []
+
+def switch_space(space_name):
+    """Switch to a specific graph space"""
+    if not st.session_state.session:
+        st.error("Please connect to Nebula Graph first")
+        return False
+    
+    try:
+        result = st.session_state.session.execute(f"USE {space_name}")
+        if result.is_succeeded():
+            st.session_state.current_space = space_name
+            return True
+        else:
+            st.error(f"Failed to switch space: {result.error_msg()}")
+            return False
+    except Exception as e:
+        st.error(f"Space switch error: {str(e)}")
         return False
 
 def execute_query(query):
@@ -118,15 +168,14 @@ def execute_query(query):
         st.error("Please connect to Nebula Graph first")
         return None
     
+    # Check if we need to be in a specific space
+    requires_space = check_query_requires_space(query)
+    
+    if requires_space and not st.session_state.current_space:
+        st.error("This query requires a graph space to be selected. Please select a space first.")
+        return None
+    
     try:
-        # Handle USE statement to update current space
-        if query.strip().upper().startswith("USE "):
-            result = st.session_state.session.execute(query)
-            if result.is_succeeded():
-                space_name = query.strip().split()[1]
-                st.session_state.current_space = space_name
-                st.success(f"Switched to space: {space_name}")
-        
         # Execute query
         start_time = time.time()
         result = st.session_state.session.execute(query)
@@ -137,15 +186,48 @@ def execute_query(query):
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'query': query,
             'success': result.is_succeeded(),
-            'time': f"{execution_time:.3f}s"
+            'time': f"{execution_time:.3f}s",
+            'space': st.session_state.current_space
         }
         st.session_state.query_history.append(query_record)
+        
+        # If this is a USE statement, update current space
+        if query.strip().upper().startswith("USE "):
+            if result.is_succeeded():
+                space_name = query.strip().split()[1].split(';')[0]
+                st.session_state.current_space = space_name
+                st.success(f"Switched to space: {space_name}")
         
         return result
         
     except Exception as e:
         st.error(f"Query execution error: {str(e)}")
         return None
+
+def check_query_requires_space(query):
+    """Check if a query requires being in a graph space"""
+    query_upper = query.strip().upper()
+    
+    # Queries that don't require a space
+    no_space_queries = [
+        "SHOW SPACES",
+        "CREATE SPACE",
+        "DROP SPACE",
+        "DESC SPACE",
+        "SHOW HOSTS",
+        "SHOW SESSIONS",
+        "SHOW CONFIGS",
+        "SHOW USERS",
+        "SHOW ROLES"
+    ]
+    
+    # Check if query starts with any of the no-space queries
+    for no_space_query in no_space_queries:
+        if query_upper.startswith(no_space_query):
+            return False
+    
+    # Most other queries require a space
+    return True
 
 def result_to_dataframe(result):
     """Convert Nebula query result to DataFrame"""
@@ -325,7 +407,45 @@ with st.sidebar:
                 st.session_state.connection_pool.close()
                 st.session_state.session = None
                 st.session_state.connection_pool = None
+                st.session_state.current_space = None
+                st.session_state.available_spaces = []
                 st.info("Disconnected")
+    
+    st.divider()
+    
+    # Space Selection
+    st.header("🌌 Space Management")
+    
+    if st.session_state.session and st.session_state.available_spaces:
+        st.markdown('<div class="space-selector">', unsafe_allow_html=True)
+        
+        current_space = st.session_state.current_space or "No space selected"
+        st.write(f"**Current Space:** `{current_space}`")
+        
+        # Space selection dropdown
+        selected_space = st.selectbox(
+            "Select a Graph Space",
+            options=[""] + st.session_state.available_spaces,
+            index=0,
+            help="Select a graph space to work with"
+        )
+        
+        if selected_space:
+            if st.button(f"Switch to {selected_space}", use_container_width=True):
+                if switch_space(selected_space):
+                    st.success(f"Switched to space: {selected_space}")
+                    st.rerun()
+        
+        # Refresh spaces button
+        if st.button("Refresh Spaces", use_container_width=True):
+            fetch_available_spaces()
+            st.rerun()
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    elif st.session_state.session:
+        st.info("Connected but no spaces found. Create a space first.")
+    else:
+        st.info("Connect to see available spaces")
     
     st.divider()
     
@@ -338,6 +458,8 @@ with st.sidebar:
                 status = "✅ Success" if record['success'] else "❌ Failed"
                 st.caption(f"Status: {status}")
                 st.caption(f"Time: {record['time']}")
+                if record.get('space'):
+                    st.caption(f"Space: {record['space']}")
     else:
         st.caption("No query history yet")
     
@@ -351,7 +473,8 @@ with st.sidebar:
         "Show all edge types": "SHOW EDGES",
         "Query vertices example": "MATCH (v) RETURN v LIMIT 10",
         "Query edges example": "MATCH ()-[e]->() RETURN e LIMIT 10",
-        "Subgraph query": "MATCH p=(v1)-[e*2]-(v2) RETURN p LIMIT 5"
+        "Subgraph query": "MATCH p=(v1)-[e*2]-(v2) RETURN p LIMIT 5",
+        "Create sample space": "CREATE SPACE IF NOT EXISTS test_space(vid_type=FIXED_STRING(30))"
     }
     
     selected_example = st.selectbox("Select example query", list(examples.keys()))
@@ -364,12 +487,16 @@ tab1, tab2, tab3 = st.tabs(["📝 Query Editor", "📊 Data Visualization", "�
 with tab1:
     st.markdown('<div class="query-box">', unsafe_allow_html=True)
     
+    # Space warning
+    if st.session_state.session and not st.session_state.current_space:
+        st.warning("⚠️ No graph space selected. Most queries require a space. Select one from the sidebar.")
+    
     # Query input
     query_input = st.text_area(
         "Enter Query Statement",
         height=150,
         value=st.session_state.get('example_query', ''),
-        placeholder="Enter your nGQL query, e.g.:\nMATCH (v:player) RETURN v.player.name, v.player.age LIMIT 10",
+        placeholder="Enter your nGQL query, e.g.:\nUSE your_space_name;\nMATCH (v:player) RETURN v.player.name, v.player.age LIMIT 10",
         key="query_input"
     )
     
@@ -383,7 +510,7 @@ with tab1:
     with col3:
         space_info = st.empty()
         if st.session_state.current_space:
-            space_info.info(f"Current space: {st.session_state.current_space}")
+            space_info.success(f"✅ Current space: **{st.session_state.current_space}**")
     
     st.markdown('</div>', unsafe_allow_html=True)
     
@@ -417,7 +544,15 @@ with tab1:
                         if result.comment():
                             st.write(f"Message: {result.comment()}")
                 else:
-                    st.error(f"Query failed: {result.error_msg()}")
+                    error_msg = result.error_msg()
+                    st.error(f"Query failed: {error_msg}")
+                    
+                    # Provide helpful suggestions based on error
+                    if "space was not chosen" in error_msg.lower():
+                        st.info("💡 **Solution:** You need to select a graph space first. Either:")
+                        st.markdown("1. Select a space from the sidebar dropdown")
+                        st.markdown("2. Add `USE your_space_name;` at the beginning of your query")
+                        st.markdown("3. Create a new space with `CREATE SPACE your_space_name(...)`")
 
 with tab2:
     st.header("Graph Visualization")
@@ -501,6 +636,8 @@ with tab3:
             if st.session_state.session:
                 st.success("✅ Connected")
                 st.metric("Current Space", st.session_state.current_space or "Not selected")
+                if st.session_state.current_space:
+                    st.markdown(f"Space selected: `{st.session_state.current_space}`")
             else:
                 st.error("❌ Not connected")
         
@@ -521,39 +658,68 @@ with tab3:
         st.write(f"Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         st.write(f"Streamlit Version: {st.__version__}")
         st.write(f"Nebula Client Available: {NEBULA_AVAILABLE}")
+        st.write(f"Available Spaces: {len(st.session_state.available_spaces)}")
+        if st.session_state.available_spaces:
+            st.write("Spaces:", ", ".join(st.session_state.available_spaces))
         st.markdown('</div>', unsafe_allow_html=True)
         
         # Quick actions
         st.subheader("Quick Actions")
         col1, col2 = st.columns(2)
         with col1:
+            if st.button("Refresh Spaces", use_container_width=True):
+                if st.session_state.session:
+                    fetch_available_spaces()
+                    st.rerun()
+                else:
+                    st.error("Not connected")
+        
+        with col2:
             if st.button("Clear History", use_container_width=True):
                 st.session_state.query_history = []
                 st.rerun()
-        
-        with col2:
-            if st.button("Test Connection", use_container_width=True):
-                if initialize_nebula_connection():
-                    st.success("Connection test successful!")
-                else:
-                    st.error("Connection test failed!")
 
 # Footer
 st.divider()
 st.caption("Nebula Graph Query Tool | Using nGQL Query Language | Data Visualization")
 
 # Usage tips
-with st.expander("💡 Usage Tips"):
+with st.expander("💡 Usage Tips & Space Management"):
     st.markdown("""
-    1. **Connection Setup**: Configure Nebula Graph connection parameters in the sidebar
-    2. **Query Syntax**: Use nGQL query language, supporting MATCH, FETCH, etc.
-    3. **Common Commands**:
-       - `SHOW SPACES` - Display all graph spaces
-       - `USE <space_name>` - Switch graph space
-       - `SHOW TAGS` - Display all vertex types
-       - `SHOW EDGES` - Display all edge types
-    4. **Visualization**: Query results automatically attempt to generate graph visualizations
-    5. **History**: The sidebar saves recent query history
+    ### Space Management Guide
     
-    **Note**: Ensure Nebula Graph service is running and network accessible.
+    1. **Connection First**: Connect to Nebula Graph using the sidebar
+    2. **Select Space**: Choose a graph space from the dropdown in the sidebar
+    3. **Create Space**: If no spaces exist, create one:
+       ```sql
+       CREATE SPACE my_space(vid_type=FIXED_STRING(30))
+       ```
+    
+    ### Common Space-Related Errors
+    
+    - **"space was not chosen"**: You need to select a space before querying
+    - **"space not exist"**: The specified space doesn't exist
+    
+    ### Quick Fixes
+    
+    1. **Select from sidebar**: Use the space selector in the left panel
+    2. **Use USE command**: Add `USE your_space;` at the beginning of your query
+    3. **Create new space**: Execute `CREATE SPACE new_space(...)`
+    
+    ### Important Notes
+    
+    - Most queries require being in a specific graph space
+    - Space names are case-sensitive
+    - You can switch spaces anytime using the sidebar or `USE` command
+    - Some commands like `SHOW SPACES` don't require a space
     """)
+
+# Add space creation helper
+with st.expander("🔧 Space Creation Helper"):
+    space_name = st.text_input("New Space Name", placeholder="my_graph_space")
+    vid_type = st.selectbox("VID Type", ["FIXED_STRING(30)", "INT64", "FIXED_STRING(64)"])
+    
+    if st.button("Generate CREATE SPACE Command"):
+        create_command = f"CREATE SPACE {space_name}(vid_type={vid_type})"
+        st.code(create_command, language="sql")
+        st.info("Copy and execute this command in the Query Editor")
