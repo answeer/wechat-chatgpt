@@ -1,295 +1,303 @@
-import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
-import networkx as nx
-from datetime import datetime
-import time
-from nebula3.gclient.net import ConnectionPool
-from nebula3.Config import Config
+# 在现有代码的基础上，修改以下部分：
 
-# Page configuration
-st.set_page_config(
-    page_title="Nebula Graph Query Tool",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Custom CSS
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #4B8BBE;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .query-box {
-        background-color: #f0f2f6;
-        padding: 20px;
-        border-radius: 10px;
-        margin-bottom: 20px;
-    }
-    .result-box {
-        background-color: #ffffff;
-        padding: 15px;
-        border-radius: 5px;
-        border-left: 4px solid #4B8BBE;
-        margin-top: 10px;
-    }
-    .stButton>button {
-        background-color: #4B8BBE;
-        color: white;
-        font-weight: bold;
-    }
-    .metric-card {
-        background-color: #f8f9fa;
-        padding: 15px;
-        border-radius: 10px;
-        border: 1px solid #dee2e6;
-    }
-    .space-selector {
-        background-color: #e8f4fd;
-        padding: 10px;
-        border-radius: 5px;
-        margin-bottom: 15px;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# Application title
-st.markdown('<h1 class="main-header">Nebula Graph Query & Visualization Tool</h1>', unsafe_allow_html=True)
-
-# Initialize session state
-if 'connection_pool' not in st.session_state:
-    st.session_state.connection_pool = None
-if 'session' not in st.session_state:
-    st.session_state.session = None
-if 'query_history' not in st.session_state:
-    st.session_state.query_history = []
-if 'current_space' not in st.session_state:
-    st.session_state.current_space = None
-if 'available_spaces' not in st.session_state:
-    st.session_state.available_spaces = []
-
-
-def get_value_as_string(v):
-    """从 Nebula ValueWrapper 中安全地提取字符串，对 Node / Edge / Path 等类型做特殊处理"""
-    try:
-        # 1. 复合类型：Node（Vertex）
-        if hasattr(v, "is_node") and v.is_node():
-            node = v.as_node()
-            try:
-                vid = node.get_id()
-            except Exception:
-                vid = getattr(node, "node_id", "UNKNOWN")
-            labels = []
-            try:
-                if hasattr(node, "get_labels"):
-                    labels = node.get_labels() or []
-                else:
-                    labels = getattr(node, "labels", []) or []
-            except Exception:
-                labels = []
-
-            label_str = ", ".join(map(str, labels)) if labels else ""
-            if label_str:
-                return f"Vertex({vid})[Tags: {label_str}]"
-            else:
-                return f"Vertex({vid})"
-
-        # 2. Edge
-        if hasattr(v, "is_edge") and v.is_edge():
-            e = v.as_edge()
-            try:
-                src = e.get_src_id()
-            except Exception:
-                src = "UNKNOWN_SRC"
-            try:
-                dst = e.get_dst_id()
-            except Exception:
-                dst = "UNKNOWN_DST"
-            try:
-                edge_name = e.get_type()
-            except Exception:
-                edge_name = getattr(e, "edge_name", "edge")
-            return f"Edge[{edge_name}]({src}->{dst})"
-
-        # 3. Path
-        if hasattr(v, "is_path") and v.is_path():
-            return "Path(...)"
-
-        # 4. List
-        if hasattr(v, "is_list") and v.is_list():
-            items = [get_value_as_string(i) for i in v.as_list()]
-            return "[" + ", ".join(items) + "]"
-
-        # 5. Record / Map 类型
-        if hasattr(v, "is_record") and v.is_record():
-            rec = v.as_record()
-            m = rec.get_values_map()
-            items = [f"{k}: {get_value_as_string(val)}" for k, val in m.items()]
-            return "{" + ", ".join(items) + "}"
-
-        # 6. 基本类型：按类型优先级逐个判断
-        if hasattr(v, "is_string") and v.is_string():
-            result = v.as_string()
-        elif hasattr(v, "is_int") and v.is_int():
-            result = v.as_int()
-        elif hasattr(v, "is_long") and v.is_long():
-            result = v.as_long()
-        elif hasattr(v, "is_double") and v.is_double():
-            result = v.as_double()
-        elif hasattr(v, "is_bool") and v.is_bool():
-            result = v.as_bool()
-        elif hasattr(v, "as_string"):
-            # 兜底：转成字符串表示
-            result = v.as_string()
-        else:
-            result = v
-
-        # 处理 bytes -> str
-        if isinstance(result, bytes):
-            try:
-                result = result.decode("utf-8")
-            except Exception:
-                result = str(result)
-
-        # 再兜底一次
-        return str(result)
-    except Exception as e:
-        try:
-            return str(v)
-        except Exception:
-            return f"[Error parsing value: {e}]"
-
-
-def initialize_nebula_connection():
-    """Initialize Nebula Graph connection"""
-    try:
-        config = Config()
-        config.max_connection_pool_size = 10
-
-        connection_pool = ConnectionPool()
-
-        # Connection parameters
-        addresses = [(st.session_state.get('nebula_host', '127.0.0.1'),
-                     st.session_state.get('nebula_port', 9669))]
-
-        # Initialize connection pool
-        if not connection_pool.init(addresses, config):
-            st.error("Connection pool initialization failed")
-            return False
-
-        # Get session
-        session = connection_pool.get_session(
-            st.session_state.get('nebula_username', 'root'),
-            st.session_state.get('nebula_password', 'nebula')
-        )
-
-        # Test connection
-        result = session.execute("SHOW HOSTS")
-        if not result.is_succeeded():
-            st.error(f"Connection test failed: {result.error_msg()}")
-            session.release()
-            return False
-
-        st.session_state.connection_pool = connection_pool
-        st.session_state.session = session
-
-        # Fetch available spaces
-        fetch_available_spaces()
-
-        return True
-
-    except Exception as e:
-        st.error(f"Connection failed: {str(e)}")
-        return False
-
-
-def fetch_available_spaces():
-    """Fetch list of available graph spaces"""
-    if not st.session_state.session:
-        return []
-
-    try:
-        result = st.session_state.session.execute("SHOW SPACES")
-        if result.is_succeeded():
-            spaces = []
-
-            for record in result:
+def extract_nodes_edges_from_result(result):
+    """直接从Nebula Result中提取节点和边信息"""
+    nodes = []
+    edges = []
+    
+    if not result or not result.is_succeeded():
+        return nodes, edges
+    
+    for record in result:
+        for value_wrapper in record.values():
+            # 处理节点
+            if hasattr(value_wrapper, "is_node") and value_wrapper.is_node():
                 try:
-                    # Get the first column value which should be the space name
-                    if record.values():
-                        value_wrapper = record.values()[0]
-                        space_name = get_value_as_string(value_wrapper)
-
-                        # Clean up the space name
-                        if space_name and space_name != "NULL" and space_name != "None":
-                            spaces.append(space_name)
-
-                except Exception:
+                    node = value_wrapper.as_node()
+                    node_id = str(node.get_id())
+                    
+                    # 获取标签
+                    tags = []
+                    if hasattr(node, "tags") and node.tags():
+                        tags = node.tags()
+                    elif hasattr(node, "get_tags"):
+                        tags = node.get_tags()
+                    
+                    # 获取属性
+                    properties = {}
+                    try:
+                        if hasattr(node, "properties"):
+                            props = node.properties()
+                            if props:
+                                for tag in tags:
+                                    prop_dict = props.get(tag, {})
+                                    if prop_dict:
+                                        properties.update(prop_dict)
+                    except Exception:
+                        pass
+                    
+                    nodes.append({
+                        'id': node_id,
+                        'label': ', '.join(tags) if tags else 'Vertex',
+                        'properties': properties
+                    })
+                except Exception as e:
                     continue
-
-            st.session_state.available_spaces = spaces
-            return spaces
+            
+            # 处理边
+            elif hasattr(value_wrapper, "is_edge") and value_wrapper.is_edge():
+                try:
+                    edge = value_wrapper.as_edge()
+                    
+                    # 获取源节点和目标节点
+                    src_id = str(edge.start_vertex_id()) if hasattr(edge, 'start_vertex_id') else str(edge.get_src_id())
+                    dst_id = str(edge.end_vertex_id()) if hasattr(edge, 'end_vertex_id') else str(edge.get_dst_id())
+                    
+                    # 获取边类型
+                    edge_name = str(edge.edge_name()) if hasattr(edge, 'edge_name') else 'edge'
+                    
+                    # 获取属性
+                    properties = {}
+                    try:
+                        if hasattr(edge, "properties"):
+                            props = edge.properties()
+                            if props:
+                                properties.update(props)
+                    except Exception:
+                        pass
+                    
+                    # 获取rank（如果存在）
+                    rank = None
+                    if hasattr(edge, "ranking"):
+                        rank = edge.ranking()
+                    
+                    edges.append({
+                        'source': src_id,
+                        'target': dst_id,
+                        'type': edge_name,
+                        'label': edge_name,
+                        'properties': properties,
+                        'rank': rank
+                    })
+                except Exception as e:
+                    continue
+            
+            # 处理路径
+            elif hasattr(value_wrapper, "is_path") and value_wrapper.is_path():
+                try:
+                    path = value_wrapper.as_path()
+                    
+                    # 提取路径中的节点
+                    if hasattr(path, "nodes"):
+                        path_nodes = path.nodes()
+                        for node in path_nodes:
+                            node_id = str(node.get_id())
+                            nodes.append({
+                                'id': node_id,
+                                'label': 'Vertex',
+                                'properties': {}
+                            })
+                    
+                    # 提取路径中的边
+                    if hasattr(path, "relationships"):
+                        rels = path.relationships()
+                        for rel in rels:
+                            src_id = str(rel.start_vertex_id()) if hasattr(rel, 'start_vertex_id') else 'unknown'
+                            dst_id = str(rel.end_vertex_id()) if hasattr(rel, 'end_vertex_id') else 'unknown'
+                            edge_name = str(rel.edge_name()) if hasattr(rel, 'edge_name') else 'edge'
+                            
+                            edges.append({
+                                'source': src_id,
+                                'target': dst_id,
+                                'type': edge_name,
+                                'label': edge_name,
+                                'properties': {},
+                                'rank': rel.ranking() if hasattr(rel, 'ranking') else None
+                            })
+                except Exception as e:
+                    continue
+    
+    # 去重节点
+    unique_nodes = {}
+    for node in nodes:
+        node_id = node['id']
+        if node_id not in unique_nodes:
+            unique_nodes[node_id] = node
         else:
-            st.error(f"Failed to fetch spaces: {result.error_msg()}")
-            return []
-    except Exception as e:
-        st.error(f"Failed to fetch spaces: {str(e)}")
-        return []
+            # 合并标签
+            if node['label'] != 'Vertex' and node['label'] not in unique_nodes[node_id]['label']:
+                unique_nodes[node_id]['label'] += f", {node['label']}"
+            # 合并属性
+            unique_nodes[node_id]['properties'].update(node['properties'])
+    
+    return list(unique_nodes.values()), edges
 
 
-def switch_space(space_name):
-    """Switch to a specific graph space"""
-    if not st.session_state.session:
-        st.error("Please connect to Nebula Graph first")
-        return False
+def visualize_graph_from_result(result):
+    """直接从Nebula结果创建可视化"""
+    nodes, edges = extract_nodes_edges_from_result(result)
+    
+    if not nodes and not edges:
+        return None
+    
+    # 创建图形
+    G = nx.DiGraph()
+    
+    # 添加节点
+    for node in nodes:
+        node_id = node['id']
+        label = node['label']
+        props = node['properties']
+        
+        # 创建节点标签
+        tooltip = f"ID: {node_id}<br>Type: {label}"
+        if props:
+            prop_str = "<br>".join([f"{k}: {v}" for k, v in props.items()])
+            tooltip += f"<br>{prop_str}"
+        
+        G.add_node(node_id, label=label, tooltip=tooltip, properties=props)
+    
+    # 添加边
+    for edge in edges:
+        source = edge['source']
+        target = edge['target']
+        edge_type = edge['type']
+        
+        # 创建边标签
+        tooltip = f"{source} → {target}<br>Type: {edge_type}"
+        if edge.get('properties'):
+            prop_str = "<br>".join([f"{k}: {v}" for k, v in edge['properties'].items()])
+            tooltip += f"<br>{prop_str}"
+        if edge.get('rank'):
+            tooltip += f"<br>Rank: {edge['rank']}"
+        
+        G.add_edge(source, target, label=edge_type, tooltip=tooltip, type=edge_type)
+    
+    # 使用更好的布局算法
+    if len(nodes) > 0:
+        try:
+            # 尝试不同的布局算法
+            if len(nodes) < 50:
+                pos = nx.spring_layout(G, seed=42, k=1.5, iterations=50)
+            elif len(nodes) < 200:
+                pos = nx.kamada_kawai_layout(G)
+            else:
+                pos = nx.circular_layout(G)
+        except:
+            pos = nx.spring_layout(G, seed=42)
+        
+        # 创建边轨迹
+        edge_x, edge_y = [], []
+        edge_text = []
+        
+        for edge in G.edges(data=True):
+            x0, y0 = pos[edge[0]]
+            x1, y1 = pos[edge[1]]
+            edge_x += [x0, x1, None]
+            edge_y += [y0, y1, None]
+            edge_text.append(edge[2].get('tooltip', ''))
+        
+        edge_trace = go.Scatter(
+            x=edge_x,
+            y=edge_y,
+            line=dict(width=1.5, color='#888'),
+            hoverinfo='text',
+            text=edge_text,
+            mode='lines',
+            name='Edges'
+        )
+        
+        # 创建节点轨迹
+        node_x, node_y, node_text, node_labels, node_colors = [], [], [], [], []
+        
+        for node in G.nodes(data=True):
+            x, y = pos[node[0]]
+            node_x.append(x)
+            node_y.append(y)
+            node_text.append(node[1].get('tooltip', str(node[0])))
+            node_labels.append(node[1].get('label', str(node[0])))
+            
+            # 根据节点类型分配颜色
+            node_type = node[1].get('label', '').lower()
+            if 'player' in node_type:
+                node_colors.append('#FF6B6B')  # 红色
+            elif 'team' in node_type:
+                node_colors.append('#4ECDC4')  # 青色
+            elif 'account' in node_type:
+                node_colors.append('#45B7D1')  # 蓝色
+            else:
+                node_colors.append('#96CEB4')  # 绿色
+        
+        node_trace = go.Scatter(
+            x=node_x,
+            y=node_y,
+            mode='markers+text',
+            hoverinfo='text',
+            text=node_labels,
+            hovertext=node_text,
+            textposition='bottom center',
+            marker=dict(
+                size=20,
+                color=node_colors,
+                line=dict(width=2, color='white')
+            ),
+            name='Nodes'
+        )
+        
+        # 创建图形
+        fig = go.Figure(
+            data=[edge_trace, node_trace],
+            layout=go.Layout(
+                title='Nebula Graph Visualization',
+                title_x=0.5,
+                showlegend=True,
+                hovermode='closest',
+                margin=dict(b=20, l=20, r=20, t=40),
+                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                plot_bgcolor='white',
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
+        )
+        
+        return fig
+    
+    return None
 
-    try:
-        # Clean the space name
-        space_name = space_name.strip().replace(';', '').replace('"', '')
 
-        # Execute USE command
-        query = "USE {}".format(space_name)
-        result = st.session_state.session.execute(query)
-        if result.is_succeeded():
-            st.session_state.current_space = space_name
-            return True
-        else:
-            st.error(f"Failed to switch space: {result.error_msg()}")
-            return False
-    except Exception as e:
-        st.error(f"Space switch error: {str(e)}")
-        return False
-
-
+# 修改execute_query函数，保存原始result
 def execute_query(query):
     """Execute query statement"""
     if not st.session_state.session:
         st.error("Please connect to Nebula Graph first")
         return None
-
-    # Clean and prepare the query
+    
     query = query.strip()
     if not query:
         st.error("Query cannot be empty")
         return None
-
-    # Check if we need to be in a specific space
+    
     requires_space = check_query_requires_space(query)
-
+    
     if requires_space and not st.session_state.current_space:
         st.error("This query requires a graph space to be selected. Please select a space first.")
         return None
-
+    
     try:
-        # Execute query
         start_time = time.time()
         result = st.session_state.session.execute(query)
         execution_time = time.time() - start_time
-
-        # Record query history
+        
+        # 保存原始结果用于可视化
+        st.session_state.last_raw_result = result
+        
+        # 记录查询历史
         query_record = {
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'query': query,
@@ -298,537 +306,126 @@ def execute_query(query):
             'space': st.session_state.current_space
         }
         st.session_state.query_history.append(query_record)
-
-        # If this is a USE statement, update current space
+        
+        # 处理USE语句
         if query.strip().upper().startswith("USE "):
             if result.is_succeeded():
-                # Extract space name from USE command
                 parts = query.split()
                 if len(parts) >= 2:
                     space_name = parts[1].replace(';', '')
                     st.session_state.current_space = space_name
                     st.success(f"Switched to space: {space_name}")
-                    # Refresh spaces list
                     fetch_available_spaces()
-
-        # If this is a CREATE SPACE or DROP SPACE command, refresh spaces
+        
+        # 处理CREATE/DROP SPACE
         elif query.strip().upper().startswith(("CREATE SPACE", "DROP SPACE")):
             if result.is_succeeded():
-                # Wait a moment for the space to be created/dropped
                 time.sleep(1)
                 fetch_available_spaces()
-
+        
         return result
-
+        
     except Exception as e:
         st.error(f"Query execution error: {str(e)}")
         return None
 
 
-def check_query_requires_space(query):
-    """Check if a query requires being in a graph space"""
-    query_upper = query.strip().upper()
-
-    # Queries that don't require a space
-    no_space_queries = [
-        "SHOW SPACES",
-        "CREATE SPACE",
-        "DROP SPACE",
-        "DESC SPACE",
-        "SHOW HOSTS",
-        "SHOW SESSIONS",
-        "SHOW CONFIGS",
-        "SHOW USERS",
-        "SHOW ROLES"
-    ]
-
-    # Check if query starts with any of the no-space queries
-    for no_space_query in no_space_queries:
-        if query_upper.startswith(no_space_query):
-            return False
-
-    # Most other queries require a space
-    return True
-
-
-def display_result_table(result):
-    """Display result in a simple table format"""
-    if not result or not result.is_succeeded():
-        return None
-
-    try:
-        # Get column names
-        columns = result.keys()
-
-        # Create data rows
-        data = []
-        for record in result:
-            row = {}
-            for i, value_wrapper in enumerate(record.values()):
-                col_name = columns[i] if i < len(columns) else f"col_{i}"
-
-                # Get the value as string using our fixed function
-                cell_value = get_value_as_string(value_wrapper)
-
-                row[col_name] = cell_value
-
-            data.append(row)
-
-        # Display as DataFrame
-        if data:
-            df = pd.DataFrame(data)
-            return df
-        else:
-            return pd.DataFrame() # Return empty DataFrame
-
-    except Exception as e:
-        st.error(f"Error displaying result: {str(e)}")
-        return None
-
-
-def visualize_graph_from_dataframe(df):
-    """Create graph visualization from DataFrame（通过列名自动识别 src/dst）"""
-    if df is None or df.empty:
-        return None
-
-    try:
-        G = nx.DiGraph()
-
-        cols_lower = [c.lower() for c in df.columns]
-
-        has_src = any(c in cols_lower for c in ["_src", "src", "source", "from", "src_id"])
-        has_dst = any(c in cols_lower for c in ["_dst", "dst", "target", "to", "dst_id"])
-
-        # --- 边表 ---
-        if has_src and has_dst:
-            src_col = [c for c in df.columns if c.lower() in ["_src", "src", "source", "from", "src_id"]][0]
-            dst_col = [c for c in df.columns if c.lower() in ["_dst", "dst", "target", "to", "dst_id"]][0]
-
-            for _, row in df.iterrows():
-                src = str(row[src_col])
-                dst = str(row[dst_col])
-
-                # 边的 label 可以从其他列取一个有代表性的
-                label = ""
-                for possible in ["_rank", "edge_type", "type", "name", "label"]:
-                    if possible in df.columns:
-                        label = str(row[possible])
-                        break
-
-                G.add_edge(src, dst, label=label)
-
-        # --- 顶点表 ---
-        else:
-            vid_col = None
-            for possible in ["vid", "id", "_vid", "vertex_id"]:
-                if possible in cols_lower:
-                    vid_col = [c for c in df.columns if c.lower() == possible][0]
-                    break
-
-            if vid_col:
-                for _, row in df.iterrows():
-                    vid = str(row[vid_col])
-                    attrs = {k: str(v) for k, v in row.items() if k != vid_col}
-                    G.add_node(vid, **attrs)
-            else:
-                # 实在没有任何明显 vid/src/dst 信息，就用 index 作为节点
-                for idx, row in df.iterrows():
-                    G.add_node(str(idx), **row.to_dict())
-
-        if G.number_of_nodes() == 0:
-            return None
-
-        # --- Plotly 绘图 ---
-        pos = nx.spring_layout(G, seed=42)
-
-        edge_x, edge_y = [], []
-        for edge in G.edges():
-            x0, y0 = pos[edge[0]]
-            x1, y1 = pos[edge[1]]
-            edge_x += [x0, x1, None]
-            edge_y += [y0, y1, None]
-
-        edge_trace = go.Scatter(
-            x=edge_x,
-            y=edge_y,
-            line=dict(width=1, color="#888"),
-            hoverinfo="none",
-            mode="lines",
-            name="Edges",
-        )
-
-        node_x, node_y, text = [], [], []
-        for node in G.nodes():
-            x, y = pos[node]
-            node_x.append(x)
-            node_y.append(y)
-            attrs = G.nodes[node]
-            label = str(node)
-            if attrs:
-                attr_text = "<br>".join([f"{k}: {v}" for k, v in attrs.items()])
-                label += f"<br>{attr_text}"
-            text.append(label)
-
-        node_trace = go.Scatter(
-            x=node_x,
-            y=node_y,
-            mode="markers+text",
-            hoverinfo="text",
-            hovertext=text,
-            text=[str(n) for n in G.nodes()],
-            textposition="bottom center",
-            marker=dict(
-                showscale=False,
-                size=25,
-                line_width=2,
-                color="skyblue",
-            ),
-            name="Nodes",
-        )
-
-        fig = go.Figure(
-            data=[edge_trace, node_trace],
-            layout=go.Layout(
-                title="Graph Visualization (from DataFrame)",
-                title_x=0.5,
-                showlegend=False,
-                hovermode="closest",
-                margin=dict(b=20, l=5, r=5, t=40),
-                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            ),
-        )
-
-        return fig
-
-    except Exception as e:
-        st.warning(f"Could not create graph visualization from DataFrame: {str(e)}")
-        return None
-
-
-# Sidebar - Connection Configuration
-with st.sidebar:
-    st.header("Connection Configuration")
-
-    # Connection parameters
-    nebula_host = st.text_input("Nebula Graph Address", value="127.0.0.1", key="nebula_host")
-    nebula_port = st.number_input("Port", value=9669, min_value=1, max_value=65535, key="nebula_port")
-    nebula_username = st.text_input("Username", value="root", key="nebula_username")
-    nebula_password = st.text_input("Password", value="nebula", type="password", key="nebula_password")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Connect to Nebula", use_container_width=True, type="primary"):
-            with st.spinner("Connecting..."):
-                if initialize_nebula_connection():
-                    st.success("Connected successfully!")
-    with col2:
-        if st.button("Disconnect", use_container_width=True):
-            if st.session_state.session:
-                st.session_state.session.release()
-                if st.session_state.connection_pool:
-                    st.session_state.connection_pool.close()
-                st.session_state.session = None
-                st.session_state.connection_pool = None
-                st.session_state.current_space = None
-                st.session_state.available_spaces = []
-                st.info("Disconnected")
-
-    st.divider()
-
-    # Space Selection
-    st.header("Space Management")
-
-    if st.session_state.session:
-        st.markdown('<div class="space-selector">', unsafe_allow_html=True)
-
-        current_space = st.session_state.current_space or "No space selected"
-        st.write(f"**Current Space:** `{current_space}`")
-
-        # Refresh spaces button
-        if st.button("Fetching Spaces", use_container_width=True, key="refresh_spaces_sidebar"):
-            with st.spinner("Fetching spaces..."):
-                fetch_available_spaces()
-                st.rerun()
-
-        # Show available spaces
-        if st.session_state.available_spaces:
-            # Space selection dropdown
-            selected_space = st.selectbox(
-                "Select a Graph Space",
-                options=[""] + st.session_state.available_spaces,
-                index=0,
-                help="Select a graph space to work with"
-            )
-
-            if selected_space:
-                if st.button(f"Switch to {selected_space}", use_container_width=True, key="switch_space_sidebar"):
-                    if switch_space(selected_space):
-                        st.success(f"Switched to space: {selected_space}")
-                        st.rerun()
-
-        else:
-            st.info("No spaces found. Create a space first.")
-            if st.button("Show CREATE SPACE Example", use_container_width=True):
-                st.code("CREATE SPACE IF NOT EXISTS test_space(vid_type=FIXED_STRING(30));")
-
-        st.markdown('</div>', unsafe_allow_html=True)
-    else:
-        st.info("Connect to see available spaces")
-
-    st.divider()
-
-    # Query Examples
-    st.header("Query Examples")
-
-    example_queries = {
-        "Show Spaces": "SHOW SPACES;",
-        "Create Space": "CREATE SPACE IF NOT EXISTS test_space(vid_type=FIXED_STRING(30));",
-        "Show Tags": "SHOW TAGS;",
-        "Show Edges": "SHOW EDGES;",
-        "Simple MATCH": "MATCH (v) RETURN v LIMIT 10;",
-        "Count Vertices": "MATCH (v) RETURN count(v) AS vertex_count;"
-    }
-
-    selected_example = st.selectbox("Choose an example:", list(example_queries.keys()))
-    if st.button("Load Example"):
-        st.session_state.example_query = example_queries[selected_example]
-        st.rerun()
-
-    st.divider()
-
-    # Query History
-    st.header("Query History")
-    if st.session_state.query_history:
-        for i, record in enumerate(reversed(st.session_state.query_history[-5:])):
-            with st.expander(f"{record['timestamp']} - {record['query'][:50]}..."):
-                st.code(record['query'])
-                status = "✅ Success" if record['success'] else "❌ Failed"
-                st.caption(f"Status: {status}")
-                st.caption(f"Time: {record['time']}")
-                if record.get('space'):
-                    st.caption(f"Space: {record['space']}")
-    else:
-        st.caption("No query history yet")
-
-    st.divider()
-
-# Main Interface
-tab1, tab2, tab3 = st.tabs(["Query Editor", "Data Visualization", "System Status"])
-
-with tab1:
-    st.markdown('<div class="query-box">', unsafe_allow_html=True)
-
-    # Space warning
-    if st.session_state.session and not st.session_state.current_space:
-        st.warning("No graph space selected. Most queries require a space. Select one from the sidebar or use: `USE your_space_name;`")
-
-    # Query input
-    query_input = st.text_area(
-        "Enter Query Statement",
-        height=150,
-        value=st.session_state.get('example_query', ''),
-        placeholder="Enter your nGQL query, e.g.:\nUSE your_space_name;\nMATCH (v) RETURN v LIMIT 10",
-        key="query_input"
-    )
-
-    col1, col2, col3 = st.columns([1, 1, 2])
-    with col1:
-        execute_btn = st.button("Execute Query", use_container_width=True, type="primary")
-    with col2:
-        if st.button("Clear Results", use_container_width=True):
-            if 'last_result_df' in st.session_state:
-                del st.session_state.last_result_df
-    with col3:
-        space_info = st.empty()
-        if st.session_state.current_space:
-            space_info.success(f"Current space: **{st.session_state.current_space}**")
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # Execute query
-    if execute_btn and query_input:
-        with st.spinner("Executing query..."):
-            result = execute_query(query_input)
-
-            if result:
-                if result.is_succeeded():
-                    st.success("Query executed successfully!")
-
-                    # Display result using our table function
-                    df = display_result_table(result)
-
-                    if df is not None and not df.empty:
-                        # Display statistics
-                        st.info(f"Returned {len(df)} rows, {len(df.columns)} columns")
-
-                        # Display data table
-                        st.dataframe(df, use_container_width=True)
-
-                        # Save result for visualization
-                        st.session_state.last_result_df = df
-
-                        # Show raw data
-                        with st.expander("View Raw Data"):
-                            st.json(df.to_dict(orient='records'))
-                    else:
-                        st.info("Query succeeded but no data returned")
-                        if hasattr(result, 'comment') and result.comment():
-                            st.write(f"Message: {result.comment()}")
-                else:
-                    error_msg = result.error_msg()
-                    st.error(f"Query failed: {error_msg}")
-
-                    # Provide helpful suggestions based on error
-                    if "space was not chosen" in error_msg.lower():
-                        st.info("**Solution:** You need to select a graph space first. Either:")
-                        st.markdown("1. Select a space from the sidebar dropdown")
-                        st.markdown("2. Add `USE your_space_name;` at the beginning of your query")
-                        st.markdown("3. Create a new space with `CREATE SPACE your_space_name(...)`")
-
+# 修改tab2中的可视化部分
 with tab2:
     st.header("Data Visualization")
-
-    if 'last_result_df' in st.session_state and st.session_state.last_result_df is not None:
-        df = st.session_state.last_result_df
-
-        # Visualization type selection
-        viz_type = st.radio(
-            "Select Visualization Type",
-            ["Table View", "Graph View", "Statistics"],
-            horizontal=True
-        )
-
-        if viz_type == "Table View":
-            # Interactive data table
-            edited_df = st.data_editor(df, use_container_width=True)
-
-            # Data export options
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                if st.button("Export as CSV"):
+    
+    # 添加查询类型提示
+    st.info("""
+    **For best graph visualization results, use MATCH queries that return paths or relationships:**
+    - `MATCH p=(v1)-[e]->(v2) RETURN p LIMIT 20`
+    - `MATCH (v1)-[e:follow]->(v2) RETURN v1, e, v2`
+    - `MATCH (v) RETURN v LIMIT 20`
+    """)
+    
+    if 'last_raw_result' in st.session_state and st.session_state.last_raw_result is not None:
+        result = st.session_state.last_raw_result
+        
+        if result.is_succeeded():
+            viz_type = st.radio(
+                "Select Visualization Type",
+                ["Graph View", "Table View", "Statistics"],
+                horizontal=True,
+                key="viz_type_selector"
+            )
+            
+            if viz_type == "Graph View":
+                # 直接使用原始结果进行可视化
+                fig = visualize_graph_from_result(result)
+                
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True, use_container_width=True)
+                    
+                    # 显示图统计信息
+                    nodes, edges = extract_nodes_edges_from_result(result)
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Nodes", len(nodes))
+                    with col2:
+                        st.metric("Edges", len(edges))
+                    with col3:
+                        st.metric("Graph Density", 
+                                 f"{len(edges) / max(len(nodes), 1):.3f}" if nodes else "N/A")
+                else:
+                    st.warning("No graph structure found in query results. Try a MATCH query that returns paths or relationships.")
+                    
+                    # 回退到表格视图
+                    df = display_result_table(result)
+                    if df is not None and not df.empty:
+                        st.dataframe(df, use_container_width=True)
+            
+            elif viz_type == "Table View":
+                df = display_result_table(result)
+                if df is not None and not df.empty:
+                    st.dataframe(df, use_container_width=True)
+                    
+                    # 添加导出功能
                     csv = df.to_csv(index=False).encode('utf-8')
                     st.download_button(
-                        label="Download CSV",
+                        label="Download as CSV",
                         data=csv,
                         file_name=f"nebula_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                         mime="text/csv"
                     )
-
-        elif viz_type == "Graph View":
-            fig = visualize_graph_from_dataframe(df)
-            if fig is not None:
-                st.plotly_chart(fig, use_container_width=True)
-                st.info("Graph visualization showing Vertex and Edge relationships")
-            else:
-                st.info("No graph data found in results. Showing table view instead:")
-                st.dataframe(df, use_container_width=True)
-
-        elif viz_type == "Statistics":
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.subheader("Data Overview")
-                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.metric("Total Rows", len(df))
-                st.metric("Total Columns", len(df.columns))
-                st.markdown('</div>', unsafe_allow_html=True)
-
-                # Data type statistics
-                st.subheader("Data Types")
-                type_counts = df.dtypes.value_counts()
-                if not type_counts.empty:
-                    st.bar_chart(type_counts)
                 else:
-                    st.info("No type information available")
-
-            with col2:
-                st.subheader("Column Information")
-                column_info = []
-                for col in df.columns:
-                    col_type = str(df[col].dtype)
-                    non_null = df[col].notnull().sum()
-                    unique_count = df[col].nunique()
-                    column_info.append({
-                        'Column': col,
-                        'Type': col_type,
-                        'Non-Null': non_null,
-                        'Unique': unique_count
-                    })
-                if column_info:
-                    st.dataframe(pd.DataFrame(column_info), use_container_width=True)
-
+                    st.info("No data to display")
+            
+            elif viz_type == "Statistics":
+                df = display_result_table(result)
+                if df is not None and not df.empty:
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.subheader("Data Overview")
+                        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                        st.metric("Total Rows", len(df))
+                        st.metric("Total Columns", len(df.columns))
+                        st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        # 数据预览
+                        st.subheader("First 5 Rows")
+                        st.dataframe(df.head(), use_container_width=True)
+                    
+                    with col2:
+                        st.subheader("Column Details")
+                        column_info = []
+                        for col in df.columns:
+                            non_null = df[col].notnull().sum()
+                            unique_count = df[col].nunique()
+                            sample_value = str(df[col].iloc[0]) if non_null > 0 else "NULL"
+                            column_info.append({
+                                'Column': col,
+                                'Non-Null': non_null,
+                                'Unique Values': unique_count,
+                                'Sample': sample_value[:50] + "..." if len(sample_value) > 50 else sample_value
+                            })
+                        
+                        st.dataframe(pd.DataFrame(column_info), use_container_width=True)
+        else:
+            st.error(f"Query failed: {result.error_msg()}")
     else:
         st.info("Please execute a query in the Query Editor tab first")
-
-with tab3:
-    st.header("System Status")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("Connection Status")
-        status_card = st.container()
-        with status_card:
-            if st.session_state.session:
-                st.success("Connected")
-                st.metric("Current Space", st.session_state.current_space or "Not selected")
-                if st.session_state.current_space:
-                    st.markdown(f"Space selected: `{st.session_state.current_space}`")
-            else:
-                st.error("Not connected")
-
-        st.subheader("Query Statistics")
-        if st.session_state.query_history:
-            total_queries = len(st.session_state.query_history)
-            successful_queries = sum(1 for q in st.session_state.query_history if q['success'])
-            success_rate = (successful_queries / total_queries * 100) if total_queries > 0 else 0
-
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Total Queries", total_queries)
-            st.metric("Success Rate", f"{success_rate:.1f}%")
-            st.markdown('</div>', unsafe_allow_html=True)
-
-    with col2:
-        st.subheader("System Information")
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.write(f"Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        st.write(f"Streamlit Version: {st.__version__}")
-        st.write(f"Available Spaces: {len(st.session_state.available_spaces)}")
-
-        if st.session_state.available_spaces:
-            spaces_display = []
-            for space in st.session_state.available_spaces:
-                if isinstance(space, bytes):
-                    try:
-                        spaces_display.append(space.decode('utf-8'))
-                    except Exception:
-                        spaces_display.append(str(space))
-                else:
-                    spaces_display.append(str(space))
-
-            if spaces_display:
-                st.write("Spaces:", ", ".join(spaces_display[:5]))
-                if len(spaces_display) > 5:
-                    st.write(f"... and {len(spaces_display) - 5} more")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        # Quick actions
-        st.subheader("Quick Actions")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Refresh Spaces", use_container_width=True, key="refresh_spaces_system"):
-                if st.session_state.session:
-                    fetch_available_spaces()
-                    st.rerun()
-                else:
-                    st.error("Not connected")
-
-        with col2:
-            if st.button("Clear History", use_container_width=True):
-                st.session_state.query_history = []
-                st.rerun()
-
-# Footer
-st.divider()
-st.caption("Nebula Graph Query Tool | Using nGQL Query Language | Data Visualization")
