@@ -1,187 +1,321 @@
-def extract_graph_data_from_df(df):
-    """从 DataFrame 抽取节点/边（适配 Nebula 常见返回列）"""
-    nodes = {}
-    edges = []
-
-    if df is None or df.empty:
-        return nodes, edges
-
-    cols_lower = [c.lower() for c in df.columns]
-
-    src_candidates = ["_src", "src", "source", "from", "src_id"]
-    dst_candidates = ["_dst", "dst", "target", "to", "dst_id"]
-
-    src_col = next((c for c in df.columns if c.lower() in src_candidates), None)
-    dst_col = next((c for c in df.columns if c.lower() in dst_candidates), None)
-
-    # --- 边模式 ---
-    if src_col and dst_col:
-        label_col = next((c for c in df.columns if c.lower() in ["edge_type", "type", "name", "label"]), None)
-
-        for _, row in df.iterrows():
-            src = str(row[src_col])
-            dst = str(row[dst_col])
-
-            nodes.setdefault(src, {"label": src, "props": {}})
-            nodes.setdefault(dst, {"label": dst, "props": {}})
-
-            label = str(row[label_col]) if label_col else ""
-            props = {k: str(v) for k, v in row.items() if k not in [src_col, dst_col]}
-
-            edges.append({
-                "src": src,
-                "dst": dst,
-                "label": label,
-                "props": props
-            })
-
-        return nodes, edges
-
-    # --- 顶点模式 ---
-    vid_candidates = ["vid", "_vid", "id", "vertex_id"]
-    vid_col = next((c for c in df.columns if c.lower() in vid_candidates), None)
-
-    if vid_col:
-        for _, row in df.iterrows():
-            vid = str(row[vid_col])
-            props = {k: str(v) for k, v in row.items() if k != vid_col}
-            nodes.setdefault(vid, {"label": vid, "props": props})
-    else:
-        # --- 兜底：每行一个点 ---
-        for idx, row in df.iterrows():
-            vid = str(idx)
-            props = {k: str(v) for k, v in row.items()}
-            nodes.setdefault(vid, {"label": vid, "props": props})
-
-    return nodes, edges
-
-
-
-
-
-def extract_graph_data_from_result(result):
-    """从 ResultSet 抽取节点/边（能识别 Vertex/Edge 就用）"""
-    nodes = {}
-    edges = []
-
+def visualize_graph_from_result(result):
+    """
+    从 Nebula 的 ResultSet 直接构建图（优先使用复杂类型：Vertex / Edge / Path）。
+    如果解析失败，返回 None，外部再用 DataFrame 版本兜底。
+    """
     if result is None or (hasattr(result, "is_succeeded") and not result.is_succeeded()):
-        return nodes, edges
+        return None
+
+    G = nx.DiGraph()
 
     try:
+        # 遍历每一行、每一列的 ValueWrapper
         for row in result:
             for val in row.values():
                 v = val
 
-                # Vertex
+                # 顶点
                 try:
                     if hasattr(v, "is_vertex") and v.is_vertex():
-                        vx = v.as_vertex() if hasattr(v, "as_vertex") else None
-                        if vx:
+                        vertex = v.as_vertex() if hasattr(v, "as_vertex") else None
+                        if vertex is not None:
+                            # 不同版本 SDK 字段名可能不同，多写几种尝试
                             vid = None
-                            if hasattr(vx, "vid"):
-                                vid = vx.vid()
-                            elif hasattr(vx, "get_id"):
-                                vid = vx.get_id()
-
+                            for attr in ["vid", "get_id", "id"]:
+                                if hasattr(vertex, attr):
+                                    _obj = getattr(vertex, attr)
+                                    vid = _obj() if callable(_obj) else _obj
+                                    break
                             if vid is not None:
-                                vid = str(vid)
-                                nodes.setdefault(vid, {"label": vid, "props": {}})
+                                G.add_node(str(vid))
                 except Exception:
                     pass
 
-                # Edge
+                # 边
                 try:
                     if hasattr(v, "is_edge") and v.is_edge():
-                        ex = v.as_edge() if hasattr(v, "as_edge") else None
-                        if ex:
+                        edge = v.as_edge() if hasattr(v, "as_edge") else None
+                        if edge is not None:
                             src = None
                             dst = None
-
-                            for attr in ["src_id", "src_vertex_id", "src"]:
-                                if hasattr(ex, attr):
-                                    obj = getattr(ex, attr)
-                                    src = obj() if callable(obj) else obj
+                            # 不同版本 SDK 里 src/dst 取法可能不同，多写几种
+                            for attr in ["src_id", "src_vertex_id", "src", "start_vertex_id"]:
+                                if hasattr(edge, attr):
+                                    _obj = getattr(edge, attr)
+                                    src = _obj() if callable(_obj) else _obj
                                     break
-                            for attr in ["dst_id", "dst_vertex_id", "dst"]:
-                                if hasattr(ex, attr):
-                                    obj = getattr(ex, attr)
-                                    dst = obj() if callable(obj) else obj
+                            for attr in ["dst_id", "dst_vertex_id", "dst", "end_vertex_id"]:
+                                if hasattr(edge, attr):
+                                    _obj = getattr(edge, attr)
+                                    dst = _obj() if callable(_obj) else _obj
                                     break
-
                             if src is not None and dst is not None:
-                                src = str(src); dst = str(dst)
-                                nodes.setdefault(src, {"label": src, "props": {}})
-                                nodes.setdefault(dst, {"label": dst, "props": {}})
-                                edges.append({"src": src, "dst": dst, "label": "", "props": {}})
+                                G.add_edge(str(src), str(dst))
                 except Exception:
                     pass
 
-        return nodes, edges
+                # 路径（p=(v)-[e]->(v2) RETURN p）
+                try:
+                    if hasattr(v, "is_path") and v.is_path():
+                        path = v.as_path() if hasattr(v, "as_path") else None
+                        if path is not None:
+                            # 不同版本 Path 结构字段名不同，这里保守处理
+                            segments = []
+                            if hasattr(path, "segments"):
+                                _seg = path.segments
+                                segments = _seg() if callable(_seg) else _seg
+                            for seg in segments:
+                                try:
+                                    # 起点
+                                    start = None
+                                    if hasattr(seg, "start_vertex"):
+                                        sv = seg.start_vertex()
+                                        if hasattr(sv, "vid"):
+                                            start = sv.vid() if callable(sv.vid) else sv.vid
+                                    # 终点
+                                    end = None
+                                    if hasattr(seg, "end_vertex"):
+                                        ev = seg.end_vertex()
+                                        if hasattr(ev, "vid"):
+                                            end = ev.vid() if callable(ev.vid) else ev.vid
+                                    if start is not None and end is not None:
+                                        G.add_edge(str(start), str(end))
+                                except Exception:
+                                    continue
+                except Exception:
+                    pass
 
-    except Exception:
-        return {}, []
+        if G.number_of_nodes() == 0:
+            # result 里没成功解析出节点/边，交给 DataFrame 兜底
+            return None
 
+        # ---- 统一的 Plotly 绘图部分 ----
+        pos = nx.spring_layout(G, seed=42)
 
+        edge_x, edge_y = [], []
+        for edge in G.edges():
+            x0, y0 = pos[edge[0]]
+            x1, y1 = pos[edge[1]]
+            edge_x += [x0, x1, None]
+            edge_y += [y0, y1, None]
 
-def visualize_graph_pyvis(nodes, edges, height="650px"):
-    """用 PyVis 生成 Nebula Studio 风格的交互图"""
-    try:
-        from pyvis.network import Network
-
-        net = Network(
-            height=height,
-            width="100%",
-            bgcolor="#ffffff",
-            font_color="#222",
-            directed=True
+        edge_trace = go.Scatter(
+            x=edge_x,
+            y=edge_y,
+            line=dict(width=1, color="#888"),
+            hoverinfo="none",
+            mode="lines",
+            name="Edges",
         )
 
-        # 类 Studio 的力导向参数
-        net.barnes_hut(
-            gravity=-20000,
-            central_gravity=0.3,
-            spring_length=120,
-            spring_strength=0.02,
-            damping=0.09
+        node_x, node_y, node_text = [], [], []
+        for node in G.nodes():
+            x, y = pos[node]
+            node_x.append(x)
+            node_y.append(y)
+            node_text.append(str(node))
+
+        node_trace = go.Scatter(
+            x=node_x,
+            y=node_y,
+            mode="markers+text",
+            hoverinfo="text",
+            text=[str(n) for n in G.nodes()],
+            textposition="bottom center",
+            marker=dict(
+                showscale=False,
+                size=25,
+                line_width=2,
+                color="skyblue",
+            ),
+            name="Nodes",
         )
 
-        # 节点
-        for nid, meta in nodes.items():
-            label = meta.get("label", nid)
-            props = meta.get("props", {})
-            title = "<br>".join([f"{k}: {v}" for k, v in props.items()]) if props else label
+        fig = go.Figure(
+            data=[edge_trace, node_trace],
+            layout=go.Layout(
+                title="Graph Visualization (from ResultSet)",
+                title_x=0.5,
+                showlegend=False,
+                hovermode="closest",
+                margin=dict(b=20, l=5, r=5, t=40),
+                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            ),
+        )
 
-            net.add_node(
-                nid,
-                label=label,
-                title=title,
-                shape="dot",
-                size=18
-            )
-
-        # 边
-        for e in edges:
-            title = "<br>".join([f"{k}: {v}" for k, v in e.get("props", {}).items()]) if e.get("props") else ""
-            net.add_edge(
-                e["src"],
-                e["dst"],
-                label=e.get("label", ""),
-                title=title,
-                arrows="to"
-            )
-
-        html = net.generate_html()
-        components.html(html, height=700, scrolling=True)
-        return True
+        return fig
 
     except Exception as e:
-        st.warning(f"PyVis render failed: {str(e)}")
-        return False
+        st.warning(f"Could not create graph visualization from result: {str(e)}")
+        return None
 
 
 
-result = st.session_state.session.execute(query)
-st.session_state.last_result_raw = result
+def visualize_graph_from_dataframe(df):
+    """Create graph visualization from DataFrame（通过列名自动识别 src/dst）"""
+    if df is None or df.empty:
+        return None
+
+    try:
+        G = nx.DiGraph()
+
+        cols_lower = [c.lower() for c in df.columns]
+
+        has_src = any(c in cols_lower for c in ["_src", "src", "source", "from", "src_id"])
+        has_dst = any(c in cols_lower for c in ["_dst", "dst", "target", "to", "dst_id"])
+
+        # --- 边表 ---
+        if has_src and has_dst:
+            src_col = [c for c in df.columns if c.lower() in ["_src", "src", "source", "from", "src_id"]][0]
+            dst_col = [c for c in df.columns if c.lower() in ["_dst", "dst", "target", "to", "dst_id"]][0]
+
+            for _, row in df.iterrows():
+                src = str(row[src_col])
+                dst = str(row[dst_col])
+
+                # 边的 label 可以从其他列取一个有代表性的
+                label = ""
+                for possible in ["_rank", "edge_type", "type", "name", "label"]:
+                    if possible in df.columns:
+                        label = str(row[possible])
+                        break
+
+                G.add_edge(src, dst, label=label)
+
+        # --- 顶点表 ---
+        else:
+            vid_col = None
+            for possible in ["vid", "id", "_vid", "vertex_id"]:
+                if possible in cols_lower:
+                    vid_col = [c for c in df.columns if c.lower() == possible][0]
+                    break
+
+            if vid_col:
+                for _, row in df.iterrows():
+                    vid = str(row[vid_col])
+                    attrs = {k: str(v) for k, v in row.items() if k != vid_col}
+                    G.add_node(vid, **attrs)
+            else:
+                # 实在没有任何明显 vid/src/dst 信息，就用 index 作为节点
+                for idx, row in df.iterrows():
+                    G.add_node(str(idx), **row.to_dict())
+
+        if G.number_of_nodes() == 0:
+            return None
+
+        # --- Plotly 绘图 ---
+        pos = nx.spring_layout(G, seed=42)
+
+        edge_x, edge_y = [], []
+        for edge in G.edges():
+            x0, y0 = pos[edge[0]]
+            x1, y1 = pos[edge[1]]
+            edge_x += [x0, x1, None]
+            edge_y += [y0, y1, None]
+
+        edge_trace = go.Scatter(
+            x=edge_x,
+            y=edge_y,
+            line=dict(width=1, color="#888"),
+            hoverinfo="none",
+            mode="lines",
+            name="Edges",
+        )
+
+        node_x, node_y, text = [], [], []
+        for node in G.nodes():
+            x, y = pos[node]
+            node_x.append(x)
+            node_y.append(y)
+            attrs = G.nodes[node]
+            label = str(node)
+            if attrs:
+                attr_text = "<br>".join([f"{k}: {v}" for k, v in attrs.items()])
+                label += f"<br>{attr_text}"
+            text.append(label)
+
+        node_trace = go.Scatter(
+            x=node_x,
+            y=node_y,
+            mode="markers+text",
+            hoverinfo="text",
+            hovertext=text,
+            text=[str(n) for n in G.nodes()],
+            textposition="bottom center",
+            marker=dict(
+                showscale=False,
+                size=25,
+                line_width=2,
+                color="skyblue",
+            ),
+            name="Nodes",
+        )
+
+        fig = go.Figure(
+            data=[edge_trace, node_trace],
+            layout=go.Layout(
+                title="Graph Visualization (from DataFrame)",
+                title_x=0.5,
+                showlegend=False,
+                hovermode="closest",
+                margin=dict(b=20, l=5, r=5, t=40),
+                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            ),
+        )
+
+        return fig
+
+    except Exception as e:
+        st.warning(f"Could not create graph visualization from DataFrame: {str(e)}")
+        return None
+
+
+
+def execute_query(query):
+    """Execute query statement"""
+    if not st.session_state.session:
+        st.error("Please connect to Nebula Graph first")
+        return None
+
+    query = query.strip()
+    if not query:
+        st.error("Query cannot be empty")
+        return None
+
+    requires_space = check_query_requires_space(query)
+
+    if requires_space and not st.session_state.current_space:
+        st.error("This query requires a graph space to be selected. Please select a space first.")
+        return None
+
+    try:
+        start_time = time.time()
+        result = st.session_state.session.execute(query)
+        execution_time = time.time() - start_time
+
+        # 保存原始 result，供 Graph View 使用
+        st.session_state.last_result_raw = result
+
+        query_record = {
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'query': query,
+            'success': result.is_succeeded(),
+            'time': f"{execution_time:.3f}s",
+            'space': st.session_state.current_space
+        }
+        st.session_state.query_history.append(query_record)
+
+        # 后面 USE / CREATE SPACE / DROP SPACE 那部分保持不变…
+        # ...
+
+        return result
+
+    except Exception as e:
+        st.error(f"Query execution error: {str(e)}")
+        return None
+
 
 
 with col2:
@@ -194,30 +328,19 @@ with col2:
 
 
 elif viz_type == "Graph View":
+    # 优先用 ResultSet 构图，失败再退回 DataFrame 版本
     raw_result = st.session_state.get("last_result_raw", None)
 
-    # 1) 优先从 ResultSet 抽取
-    nodes, edges = extract_graph_data_from_result(raw_result) if raw_result else ({}, [])
+    fig = None
+    if raw_result is not None:
+        fig = visualize_graph_from_result(raw_result)
 
-    # 2) 不够就从 DataFrame 抽取兜底
-    if len(nodes) == 0 and len(edges) == 0:
-        nodes, edges = extract_graph_data_from_df(df)
+    if fig is None:
+        fig = visualize_graph_from_dataframe(df)
 
-    # 3) 仍然没有图数据
-    if len(nodes) == 0 and len(edges) == 0:
-        st.info("No graph structure detected. Showing table view instead:")
-        st.dataframe(df, use_container_width=True)
+    if fig is not None:
+        st.plotly_chart(fig, use_container_width=True)
+        st.info("Graph visualization showing Vertex and Edge relationships")
     else:
-        # 4) PyVis（最像 Nebula Studio）
-        ok = visualize_graph_pyvis(nodes, edges)
-
-        # 5) PyVis 失败再用你原 Plotly 版本兜底
-        if not ok:
-            fig = visualize_graph_from_dataframe(df)
-            if fig:
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.dataframe(df, use_container_width=True)
-
-
-import streamlit.components.v1 as components
+        st.info("No graph data found in results. Showing table view instead:")
+        st.dataframe(df, use_container_width=True)
