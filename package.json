@@ -1,210 +1,223 @@
-import streamlit as st
-from nebula3.gclient.net import ConnectionPool
-from nebula3.Config import Config
-from pyvis.network import Network
-import json
-import tempfile
+def extract_graph_data_from_df(df):
+    """从 DataFrame 抽取节点/边（适配 Nebula 常见返回列）"""
+    nodes = {}
+    edges = []
 
-st.set_page_config(page_title="NebulaGraph Query Studio", layout="wide")
+    if df is None or df.empty:
+        return nodes, edges
 
-# ----------------- session_state 初始化 -----------------
-for key, default in [
-    ("client", None),
-    ("spaces", []),
-    ("history", []),
-    ("query", 'MATCH p=(v)-[e]->(v2) RETURN p LIMIT 20'),
-]:
-    if key not in st.session_state:
-        st.session_state[key] = default
+    cols_lower = [c.lower() for c in df.columns]
 
+    src_candidates = ["_src", "src", "source", "from", "src_id"]
+    dst_candidates = ["_dst", "dst", "target", "to", "dst_id"]
 
-# ----------------- Nebula 连接 -----------------
-@st.cache_resource
-def init_client(ip: str, port: int, user: str, password: str):
-    config = Config()
-    config.max_connection_pool_size = 20
-    pool = ConnectionPool()
-    ok = pool.init([(ip, port)], config)
-    if not ok:
-        raise RuntimeError("无法连接 NebulaGraph，请检查 IP/端口")
+    src_col = next((c for c in df.columns if c.lower() in src_candidates), None)
+    dst_col = next((c for c in df.columns if c.lower() in dst_candidates), None)
 
-    client = pool.get_session(user, password)
-    return client
+    # --- 边模式 ---
+    if src_col and dst_col:
+        label_col = next((c for c in df.columns if c.lower() in ["edge_type", "type", "name", "label"]), None)
 
+        for _, row in df.iterrows():
+            src = str(row[src_col])
+            dst = str(row[dst_col])
 
-def list_spaces(client):
-    """
-    使用 execute_json，而不是直接去解析 Value 对象
-    返回 space 名称列表
-    """
-    raw = client.execute_json("SHOW SPACES")
-    data = json.loads(raw)
+            nodes.setdefault(src, {"label": src, "props": {}})
+            nodes.setdefault(dst, {"label": dst, "props": {}})
 
-    results = data.get("results", [])
-    if not results:
-        return []
+            label = str(row[label_col]) if label_col else ""
+            props = {k: str(v) for k, v in row.items() if k not in [src_col, dst_col]}
 
-    first = results[0]
-    rows = first.get("data", [])
-    spaces = []
-    for item in rows:
-        row = item.get("row", [])
-        if row:
-            # SHOW SPACES 只有一列，就是 space 名
-            spaces.append(row[0])
-    return spaces
+            edges.append({
+                "src": src,
+                "dst": dst,
+                "label": label,
+                "props": props
+            })
 
+        return nodes, edges
 
-# ----------------- 图数据解析：使用 dict_for_vis -----------------
-def result_to_vis_data(result):
-    """
-    使用官方提供的 dict_for_vis 接口生成可视化用的数据，
-    这样我们就不需要直接访问 Value / Vertex / Edge 内部结构了
-    """
-    try:
-        vis = result.dict_for_vis()
-    except AttributeError:
-        # 说明 nebula3-python 太老了，建议升级
-        raise RuntimeError(
-            "当前 nebula3-python 不支持 ResultSet.dict_for_vis()，"
-            "请先执行：pip install -U nebula3-python"
-        )
+    # --- 顶点模式 ---
+    vid_candidates = ["vid", "_vid", "id", "vertex_id"]
+    vid_col = next((c for c in df.columns if c.lower() in vid_candidates), None)
 
-    # 规范结构参考官方文档：
-    # {
-    #   "nodes": [{ "id": "...", "labels": [...], "props": {...} }],
-    #   "edges": [{ "src": "...", "dst": "...", "name": "...", "props": {...} }],
-    #   ...
-    # }
-    nodes = vis.get("nodes", [])
-    edges = vis.get("edges", [])
+    if vid_col:
+        for _, row in df.iterrows():
+            vid = str(row[vid_col])
+            props = {k: str(v) for k, v in row.items() if k != vid_col}
+            nodes.setdefault(vid, {"label": vid, "props": props})
+    else:
+        # --- 兜底：每行一个点 ---
+        for idx, row in df.iterrows():
+            vid = str(idx)
+            props = {k: str(v) for k, v in row.items()}
+            nodes.setdefault(vid, {"label": vid, "props": props})
+
     return nodes, edges
 
 
-def visualize_graph(nodes, edges):
-    net = Network(height="650px", width="100%", bgcolor="#1e1e1e", font_color="white")
-    net.force_atlas_2based()
-
-    # nodes: {id, labels, props}
-    for n in nodes:
-        node_id = str(n.get("id"))
-        labels = n.get("labels") or []
-        label = ",".join(labels) if labels else node_id
-        props = n.get("props") or {}
-
-        net.add_node(
-            node_id,
-            label=label,
-            title=json.dumps(props, ensure_ascii=False, indent=2),
-            size=25,
-        )
-
-    # edges: {src, dst, name, props}
-    for e in edges:
-        src = str(e.get("src"))
-        dst = str(e.get("dst"))
-        name = e.get("name") or ""
-        props = e.get("props") or {}
-
-        net.add_edge(
-            src,
-            dst,
-            label=name,
-            title=json.dumps(props, ensure_ascii=False, indent=2),
-        )
-
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html")
-    net.save_graph(tmp.name)
-    return tmp.name
 
 
-# ----------------- Sidebar：连接 / Space 选择 -----------------
-st.sidebar.header("NebulaGraph 配置")
 
-ip = st.sidebar.text_input("IP", "127.0.0.1")
-port = st.sidebar.number_input("Port", 9669, step=1)
-user = st.sidebar.text_input("User", "root")
-password = st.sidebar.text_input("Password", "nebula", type="password")
+def extract_graph_data_from_result(result):
+    """从 ResultSet 抽取节点/边（能识别 Vertex/Edge 就用）"""
+    nodes = {}
+    edges = []
 
-if st.sidebar.button("连接 / 重连", use_container_width=True):
+    if result is None or (hasattr(result, "is_succeeded") and not result.is_succeeded()):
+        return nodes, edges
+
     try:
-        client = init_client(ip, int(port), user, password)
-        st.session_state["client"] = client
-        st.session_state["spaces"] = list_spaces(client)
-        if st.session_state["spaces"]:
-            st.sidebar.success("连接成功！")
-        else:
-            st.sidebar.warning("连接成功，但没有 Space，请先在 Nebula 中创建 Space。")
+        for row in result:
+            for val in row.values():
+                v = val
+
+                # Vertex
+                try:
+                    if hasattr(v, "is_vertex") and v.is_vertex():
+                        vx = v.as_vertex() if hasattr(v, "as_vertex") else None
+                        if vx:
+                            vid = None
+                            if hasattr(vx, "vid"):
+                                vid = vx.vid()
+                            elif hasattr(vx, "get_id"):
+                                vid = vx.get_id()
+
+                            if vid is not None:
+                                vid = str(vid)
+                                nodes.setdefault(vid, {"label": vid, "props": {}})
+                except Exception:
+                    pass
+
+                # Edge
+                try:
+                    if hasattr(v, "is_edge") and v.is_edge():
+                        ex = v.as_edge() if hasattr(v, "as_edge") else None
+                        if ex:
+                            src = None
+                            dst = None
+
+                            for attr in ["src_id", "src_vertex_id", "src"]:
+                                if hasattr(ex, attr):
+                                    obj = getattr(ex, attr)
+                                    src = obj() if callable(obj) else obj
+                                    break
+                            for attr in ["dst_id", "dst_vertex_id", "dst"]:
+                                if hasattr(ex, attr):
+                                    obj = getattr(ex, attr)
+                                    dst = obj() if callable(obj) else obj
+                                    break
+
+                            if src is not None and dst is not None:
+                                src = str(src); dst = str(dst)
+                                nodes.setdefault(src, {"label": src, "props": {}})
+                                nodes.setdefault(dst, {"label": dst, "props": {}})
+                                edges.append({"src": src, "dst": dst, "label": "", "props": {}})
+                except Exception:
+                    pass
+
+        return nodes, edges
+
+    except Exception:
+        return {}, []
+
+
+
+def visualize_graph_pyvis(nodes, edges, height="650px"):
+    """用 PyVis 生成 Nebula Studio 风格的交互图"""
+    try:
+        from pyvis.network import Network
+
+        net = Network(
+            height=height,
+            width="100%",
+            bgcolor="#ffffff",
+            font_color="#222",
+            directed=True
+        )
+
+        # 类 Studio 的力导向参数
+        net.barnes_hut(
+            gravity=-20000,
+            central_gravity=0.3,
+            spring_length=120,
+            spring_strength=0.02,
+            damping=0.09
+        )
+
+        # 节点
+        for nid, meta in nodes.items():
+            label = meta.get("label", nid)
+            props = meta.get("props", {})
+            title = "<br>".join([f"{k}: {v}" for k, v in props.items()]) if props else label
+
+            net.add_node(
+                nid,
+                label=label,
+                title=title,
+                shape="dot",
+                size=18
+            )
+
+        # 边
+        for e in edges:
+            title = "<br>".join([f"{k}: {v}" for k, v in e.get("props", {}).items()]) if e.get("props") else ""
+            net.add_edge(
+                e["src"],
+                e["dst"],
+                label=e.get("label", ""),
+                title=title,
+                arrows="to"
+            )
+
+        html = net.generate_html()
+        components.html(html, height=700, scrolling=True)
+        return True
+
     except Exception as e:
-        st.session_state["client"] = None
-        st.session_state["spaces"] = []
-        st.sidebar.error(f"连接失败：{e}")
+        st.warning(f"PyVis render failed: {str(e)}")
+        return False
 
-client = st.session_state["client"]
-spaces = st.session_state["spaces"]
 
-if client is None:
-    st.warning("请先在左侧连接 NebulaGraph。")
-    st.stop()
 
-if not spaces:
-    st.warning("当前没有可用 Space。")
-    st.stop()
+result = st.session_state.session.execute(query)
+st.session_state.last_result_raw = result
 
-space = st.sidebar.selectbox("选择 Space", spaces)
-use_res = client.execute(f"USE {space}")
-if not use_res.is_succeeded():
-    st.error(f"切换 Space 失败：{use_res.error_msg()}")
-    st.stop()
 
-# ----------------- 主界面：查询 & 结果 -----------------
-st.title("NebulaGraph 图查询平台（稳定版，无 Value API 依赖）")
+with col2:
+    if st.button("Clear Results", use_container_width=True):
+        if 'last_result_df' in st.session_state:
+            del st.session_state.last_result_df
+        if 'last_result_raw' in st.session_state:
+            del st.session_state.last_result_raw
 
-query = st.text_area(
-    "输入 nGQL（建议返回图结构，如 MATCH / GET SUBGRAPH）：",
-    key="query",
-    height=150,
-)
 
-col_run, col_clear = st.columns(2)
-run = col_run.button("执行查询", use_container_width=True)
-clear_hist = col_clear.button("清空历史", use_container_width=True)
 
-if clear_hist:
-    st.session_state["history"] = []
+elif viz_type == "Graph View":
+    raw_result = st.session_state.get("last_result_raw", None)
 
-if run:
-    if not query.strip():
-        st.warning("请输入查询语句")
+    # 1) 优先从 ResultSet 抽取
+    nodes, edges = extract_graph_data_from_result(raw_result) if raw_result else ({}, [])
+
+    # 2) 不够就从 DataFrame 抽取兜底
+    if len(nodes) == 0 and len(edges) == 0:
+        nodes, edges = extract_graph_data_from_df(df)
+
+    # 3) 仍然没有图数据
+    if len(nodes) == 0 and len(edges) == 0:
+        st.info("No graph structure detected. Showing table view instead:")
+        st.dataframe(df, use_container_width=True)
     else:
-        try:
-            result = client.execute(query)
-            if not result.is_succeeded():
-                st.error(f"查询失败：{result.error_msg()}")
+        # 4) PyVis（最像 Nebula Studio）
+        ok = visualize_graph_pyvis(nodes, edges)
+
+        # 5) PyVis 失败再用你原 Plotly 版本兜底
+        if not ok:
+            fig = visualize_graph_from_dataframe(df)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
             else:
-                # 记录历史
-                if query not in st.session_state["history"]:
-                    st.session_state["history"].insert(0, query)
-
-                nodes, edges = result_to_vis_data(result)
-
-                st.subheader("查询结果概览")
-                st.write(f"节点数：{len(nodes)}  |  边数：{len(edges)}")
-
-                with st.expander("查看原始 nodes 数据"):
-                    st.json(nodes)
-                with st.expander("查看原始 edges 数据"):
-                    st.json(edges)
-
-                html_path = visualize_graph(nodes, edges)
-                with open(html_path, "r", encoding="utf-8") as f:
-                    st.components.v1.html(f.read(), height=680)
-        except Exception as e:
-            st.error(f"执行异常：{e}")
+                st.dataframe(df, use_container_width=True)
 
 
-# ----------------- 侧栏：查询历史 -----------------
-st.sidebar.subheader("查询历史（点击填充）")
-for i, q in enumerate(st.session_state["history"][:20]):
-    if st.sidebar.button(q, key=f"hist_{i}"):
-        st.session_state["query"] = q
+import streamlit.components.v1 as components
