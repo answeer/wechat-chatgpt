@@ -1,0 +1,400 @@
+{
+  "header": {
+    "clientRefNumber": "sb_job_id",
+    "job_id": "swoosh_job_id",
+    "project_version": "1.0.0",
+    "project_id": "PHOENIX",
+    "cwid": "CW123",
+    "status": "Completed",
+    "error_code": "200",
+    "error_description": "success",
+    "prediction_date": "2024-08-01 00:00:00"
+  },
+  "extracted_values": [
+    {
+      "entity_name": "Liability Clause",
+      "pred_ref_id": "C1",
+      "coverage_score": 78,
+      "clause_library_version": "V1",
+      "clause_library_text": "clause text from the clause library",
+      "coverage_explainability": "explanation on the coverage score",
+      "confidence": 85,
+      "value": [
+        {
+          "clause_text": "clause text extracted from the document",
+          "location": {
+            "cwid": "CW2",
+            "clause_overwritten": "unique_doc_id",
+            "unique_doc_id": "123",
+            "page": {
+              "1": [["xmin", "ymin", "xmax", "ymax"], ["xmin", "ymin", "xmax", "ymax"]]
+            }
+          }
+        },
+        {
+          "clause_text": "clause text extracted from the document",
+          "location": {
+            "cwid": "CW2",
+            "clause_overwritten": "No",
+            "unique_doc_id": "123",
+            "page": {
+              "1": [["xmin", "ymin", "xmax", "ymax"], ["xmin", "ymin", "xmax", "ymax"]]
+            }
+          }
+        },
+        {
+          "clause_text": "clause text extracted from the document",
+          "location": {
+            "cwid": "CW4",
+            "clause_overwritten": "No",
+            "unique_doc_id": "124",
+            "page": {
+              "1": [["xmin", "ymin", "xmax", "ymax"], ["xmin", "ymin", "xmax", "ymax"]]
+            }
+          }
+        }
+      ],
+      "clause_text_consolidated": "The liability of either party shall be capped at 12 months of fees paid or payable under this agreement. Neither party shall be liable for any indirect, consequential, special or punitive damages arising out of or related to this agreement.",
+      "clause_qna": [
+        { "question_id": "Q1", "question": "Is indirect liability excluded?", "answer": "Yes, consequential losses are excluded" }
+      ]
+    },
+    {
+      "entity_name": "Resolution Clause",
+      "pred_ref_id": "C2",
+      "coverage_score": 65,
+      "clause_library_version": "V1",
+      "clause_library_text": "clause text from the clause library",
+      "coverage_explainability": "explanation on the coverage score",
+      "confidence": 80,
+      "value": [{ "clause_text": "...", "location": { "...": "..." } }],
+      "clause_text_consolidated": "...",
+      "clause_qna": [{ "question_id": "Q1", "question": "...", "answer": "..." }]
+    },
+    {
+      "entity_name": "Data Protection Clause",
+      "pred_ref_id": "C3",
+      "coverage_score": 90,
+      "clause_library_version": "V1",
+      "clause_library_text": "clause text from the clause library",
+      "coverage_explainability": "explanation on the coverage score",
+      "confidence": 88,
+      "value": [{ "clause_text": "...", "location": { "...": "..." } }],
+      "clause_text_consolidated": "...",
+      "clause_qna": [{ "question_id": "Q1", "question": "...", "answer": "..." }]
+    },
+    {
+      "entity_name": "Force Majeure Clause",
+      "pred_ref_id": "C4",
+      "coverage_score": 55,
+      "clause_library_version": "V1",
+      "clause_library_text": "clause text from the clause library",
+      "coverage_explainability": "explanation on the coverage score",
+      "confidence": 75,
+      "value": [{ "clause_text": "...", "location": { "...": "..." } }],
+      "clause_text_consolidated": "...",
+      "clause_qna": [{ "question_id": "Q1", "question": "...", "answer": "..." }]
+    }
+  ]
+}
+
+
+
+
+
+{
+  "generated": "2026-04-23 09:39:25",
+  "source_csv": "collated_extraction_results.csv",
+  "total_bundles": 5,
+  "bundles": {
+    "CW1001": [
+      {
+        "name": "MSA_GlobalSupplies.pdf",
+        "type": "Master Agreement",
+        "contract_id": "CW001",
+        "parent_id": "",
+        "valid": true
+      },
+      {
+        "name": "Amendment_1_GlobalSupplies.pdf",
+        "type": "Variation Agreement",
+        "contract_id": "CW001-V1",
+        "parent_id": "CW001",
+        "valid": true
+      },
+      {
+        "name": "Amendment_2_GlobalSupplies.pdf",
+        "type": "Variation Agreement",
+        "contract_id": "CW001-V2",
+        "parent_id": "CW001",
+        "valid": true
+      },
+      {
+        "name": "SOW_Phase1_GlobalSupplies.pdf",
+        "type": "Sub Agreement",
+        "contract_id": "CW001-S01",
+        "parent_id": "CW001",
+        "valid": true
+      },
+      {
+        "name": "SOW_Phase1_Amendment.pdf",
+        "type": "Variation Agreement",
+        "contract_id": "CW001-S01-V1",
+        "parent_id": "CW001-S01",
+        "valid": true
+      },
+      {
+        "name": "NDA_GlobalSupplies.pdf",
+        "type": "Non-Disclosure Agreement",
+        "contract_id": "CW001-NDA",
+        "parent_id": "CW001",
+        "valid": true
+      },
+      {
+        "name": "SOW_Phase2_GlobalSupplies.pdf",
+        "type": "Sub Agreement",
+        "contract_id": "CW001-S02",
+        "parent_id": "CW001",
+        "valid": true
+      },
+      {
+        "name": "DPA_GlobalSupplies.pdf",
+        "type": "Data Processing Agreement",
+        "contract_id": "CW001-DPA",
+        "parent_id": "CW001",
+        "valid": true
+      }
+    ],
+    "CW1002": [
+      {
+        "name": "MSA_TechVendor.pdf",
+        "type": "Master Agreement",
+        "contract_id": "CW002",
+        "parent_id": "",
+        "valid": true
+      },
+      {
+        "name": "Addendum_1_TechVendor.pdf",
+        "type": "Addendum",
+        "contract_id": "CW002-V1",
+        "parent_id": "CW002",
+        "valid": true
+      },
+      {
+        "name": "Schedule_A_TechVendor.pdf",
+        "type": "Schedule",
+        "contract_id": "CW002-S01",
+        "parent_id": "CW002",
+        "valid": true
+      },
+      {
+        "name": "Schedule_B_TechVendor.pdf",
+        "type": "Schedule",
+        "contract_id": "CW002-S02",
+        "parent_id": "CW002",
+        "valid": true
+      },
+      {
+        "name": "SideLetter_TechVendor.pdf",
+        "type": "Side Letter",
+        "contract_id": "CW002-V2",
+        "parent_id": "CW002",
+        "valid": true
+      },
+      {
+        "name": "NDA_TechVendor.pdf",
+        "type": "Confidentiality Agreement",
+        "contract_id": "CW002-NDA",
+        "parent_id": "CW002",
+        "valid": true
+      },
+      {
+        "name": "Schedule_B_Amendment.pdf",
+        "type": "Variation Agreement",
+        "contract_id": "CW002-S02-V1",
+        "parent_id": "CW002-S02",
+        "valid": true
+      }
+    ],
+    "CW1003": [
+      {
+        "name": "PurchaseOrder_001.pdf",
+        "type": "Purchase Order",
+        "contract_id": "CW003",
+        "parent_id": "",
+        "valid": true
+      },
+      {
+        "name": "PurchaseOrder_001_Amendment.pdf",
+        "type": "Variation Agreement",
+        "contract_id": "CW003-V1",
+        "parent_id": "CW003",
+        "valid": true
+      },
+      {
+        "name": "Certificate_Completion.pdf",
+        "type": "Certificate",
+        "contract_id": "CW003-CERT",
+        "parent_id": "CW003",
+        "valid": true
+      }
+    ],
+    "CW1004": [
+      {
+        "name": "MSA_Consulting.pdf",
+        "type": "Master Agreement",
+        "contract_id": "CW004",
+        "parent_id": "",
+        "valid": true
+      },
+      {
+        "name": "SOW_Consulting_Phase1.pdf",
+        "type": "Sub Agreement",
+        "contract_id": "CW004-S01",
+        "parent_id": "CW004",
+        "valid": true
+      },
+      {
+        "name": "SOW_Consulting_Phase2.pdf",
+        "type": "Sub Agreement",
+        "contract_id": "CW004-S02",
+        "parent_id": "CW004",
+        "valid": true
+      },
+      {
+        "name": "SOW_Consulting_Phase3.pdf",
+        "type": "Sub Agreement",
+        "contract_id": "CW004-S03",
+        "parent_id": "CW004",
+        "valid": true
+      },
+      {
+        "name": "SOW_Phase2_Variation.pdf",
+        "type": "Variation Agreement",
+        "contract_id": "CW004-S02-V1",
+        "parent_id": "CW004-S02",
+        "valid": true
+      },
+      {
+        "name": "PowerOfAttorney_Consulting.pdf",
+        "type": "Power of Attorney",
+        "contract_id": "CW004-POA",
+        "parent_id": "CW004",
+        "valid": true
+      },
+      {
+        "name": "MSA_Consulting_Amendment1.pdf",
+        "type": "Variation Agreement",
+        "contract_id": "CW004-V1",
+        "parent_id": "CW004",
+        "valid": true
+      }
+    ],
+    "CW1005": [
+      {
+        "name": "UnknownDoc.pdf",
+        "type": "nan",
+        "contract_id": "CW005",
+        "parent_id": "",
+        "valid": false
+      }
+    ]
+  }
+}
+
+
+
+
+{
+  "header": {
+    "cwid": "aMC01272",
+    "doc": "CPG Maintenance Agreement 20190219 - signed.pdf",
+    "clause_key": "Assignment/ Novation",
+    "status": "SUCCESS",
+    "prediction_date": "2026-04-23 10:17:25"
+  },
+  "clause_result": {
+    "clause_key": "Assignment/ Novation",
+    "present": true,
+    "coverage_score": 75,
+    "page_locations": [
+      {
+        "page_number": 17,
+        "clause_text": "18.2 The Customer shall not transfer or assign this Agreement without the prior written consent of BCSIS, which consent shall not be unreasonably withheld, provided that Customer may assign this Agreement on notification in writing to BCSIS, if the assignment is to an Affiliate of the Customer, strictly being an Affiliate which is an entity approved by the Monetary Authority of Singapore for the Purpose.",
+        "location_": "0.15-0.10-0.85-0.35"
+      }
+    ],
+    "answers": [
+      {
+        "question": "Clause present or not?",
+        "answer": "Yes"
+      },
+      {
+        "question": "clause text mentioned in the document",
+        "answer": "18.2 The Customer shall not transfer or assign this Agreement without the prior written consent of BCSIS, which consent shall not be unreasonably withheld, provided that Customer may assign this Agreement on notification in writing to BCSIS, if the assignment is to an Affiliate of the Customer, strictly being an Affiliate which is an entity approved by the Monetary Authority of Singapore for the Purpose."
+      },
+      {
+        "question": "coverage score in relation with the SCB defenitions. (0 very low, 100 very high)",
+        "answer": "75"
+      },
+      {
+        "question": "Page locations? (all page numbers where the clause is present)",
+        "answer": "17"
+      },
+      {
+        "question": "Is Supplier consent required to assign/novate within the Group?",
+        "answer": "No - Customer may assign to an Affiliate on notification in writing to BCSIS (Supplier), provided the Affiliate is an entity approved by the Monetary Authority of Singapore"
+      },
+      {
+        "question": "Is Supplier consent required to assign/novate outside Group (with no exception for \"successors\" to the Bank's entity's business)?",
+        "answer": "Yes - The Customer shall not transfer or assign this Agreement without the prior written consent of BCSIS"
+      },
+      {
+        "question": "Contract has Assignment Clause - Internal?",
+        "answer": "Yes"
+      },
+      {
+        "question": "Is consent Requried to Assign / novate within the SC Group?",
+        "answer": "No - only notification in writing is required for assignment to an Affiliate approved by the Monetary Authority of Singapore"
+      },
+      {
+        "question": "Contract has Assignment Clause - External?",
+        "answer": "Yes"
+      },
+      {
+        "question": "Is the definition of \"SCB Group\" consistent with the definition extracted from the contract document?",
+        "answer": "Partially - The contract refers to 'Affiliate' approved by Monetary Authority of Singapore rather than explicitly defining 'SCB Group' or 'Customer Group'. The SCB standard definition refers to 'Customer Group member' which is broader than the contract's specific requirement for MAS-approved Affiliates."
+      }
+    ]
+  }
+}
+
+
+
+timestamp	cw_id	file	status	Contract ID	Parent Contract ID	Document Title	Contract Type	Hierarchical Type
+2026/4/1 9:00	CW1001	MSA_GlobalSupplies.pdf	success	CW001		Master Services Agreement - Global Supplies Ltd	Master Service Agreement	Master Agreement
+2026/4/1 9:05	CW1001	Amendment_1_GlobalSupplies.pdf	success	CW001-V1	CW001	Amendment No.1 to MSA - Global Supplies Ltd	Amendment	Variation Agreement
+2026/4/1 9:10	CW1001	Amendment_2_GlobalSupplies.pdf	success	CW001-V2	CW001	Amendment No.2 to MSA - Global Supplies Ltd	Amendment	Variation Agreement
+2026/4/1 9:15	CW1001	SOW_Phase1_GlobalSupplies.pdf	success	CW001-S01	CW001	Statement of Work - Phase 1	Statement of Work	Sub Agreement
+2026/4/1 9:20	CW1001	SOW_Phase1_Amendment.pdf	success	CW001-S01-V1	CW001-S01	Amendment to SOW Phase 1	Amendment	Variation Agreement
+2026/4/1 9:25	CW1001	NDA_GlobalSupplies.pdf	success	CW001-NDA	CW001	Non-Disclosure Agreement - Global Supplies Ltd	NDA	Non-Disclosure Agreement
+2026/4/1 9:30	CW1001	SOW_Phase2_GlobalSupplies.pdf	success	CW001-S02	CW001	Statement of Work - Phase 2	Statement of Work	Sub Agreement
+2026/4/1 9:35	CW1001	DPA_GlobalSupplies.pdf	success	CW001-DPA	CW001	Data Processing Agreement - Global Supplies Ltd	DPA	Data Processing Agreement
+2026/4/2 10:00	CW1002	MSA_TechVendor.pdf	success	CW002		Master Agreement - Tech Vendor Inc	Master Agreement	Master Agreement
+2026/4/2 10:05	CW1002	Addendum_1_TechVendor.pdf	success	CW002-V1	CW002	Addendum No.1 - Tech Vendor Inc	Addendum	Addendum
+2026/4/2 10:10	CW1002	Schedule_A_TechVendor.pdf	success	CW002-S01	CW002	Schedule A - Software Licensing	Schedule	Schedule
+2026/4/2 10:15	CW1002	Schedule_B_TechVendor.pdf	success	CW002-S02	CW002	Schedule B - Support Services	Schedule	Schedule
+2026/4/2 10:20	CW1002	SideLetter_TechVendor.pdf	success	CW002-V2	CW002	Side Letter - Pricing Adjustment	Side Letter	Side Letter
+2026/4/2 10:25	CW1002	NDA_TechVendor.pdf	success	CW002-NDA	CW002	Confidentiality Agreement - Tech Vendor Inc	Confidentiality Agreement	Confidentiality Agreement
+2026/4/2 10:30	CW1002	Schedule_B_Amendment.pdf	success	CW002-S02-V1	CW002-S02	Amendment to Schedule B - Support Services	Amendment	Variation Agreement
+2026/4/3 11:00	CW1003	PurchaseOrder_001.pdf	success	CW003		Purchase Order #001 - Office Equipment	Purchase Order	Purchase Order
+2026/4/3 11:05	CW1003	PurchaseOrder_001_Amendment.pdf	success	CW003-V1	CW003	Amendment to PO #001	Amendment	Variation Agreement
+2026/4/3 11:10	CW1003	Certificate_Completion.pdf	success	CW003-CERT	CW003	Certificate of Completion - PO #001	Certificate	Certificate
+2026/4/4 12:00	CW1004	MSA_Consulting.pdf	success	CW004		Master Consulting Agreement	Master Services Agreement	Master Agreement
+2026/4/4 12:05	CW1004	SOW_Consulting_Phase1.pdf	success	CW004-S01	CW004	Consulting SOW - Phase 1 Discovery	Statement of Work	Sub Agreement
+2026/4/4 12:10	CW1004	SOW_Consulting_Phase2.pdf	success	CW004-S02	CW004	Consulting SOW - Phase 2 Delivery	Statement of Work	Sub Agreement
+2026/4/4 12:15	CW1004	SOW_Consulting_Phase3.pdf	success	CW004-S03	CW004	Consulting SOW - Phase 3 Support	Statement of Work	Sub Agreement
+2026/4/4 12:20	CW1004	SOW_Phase2_Variation.pdf	success	CW004-S02-V1	CW004-S02	Variation to Consulting SOW Phase 2	Variation	Variation Agreement
+2026/4/4 12:25	CW1004	PowerOfAttorney_Consulting.pdf	success	CW004-POA	CW004	Power of Attorney - Consulting Agreement	Power of Attorney	Power of Attorney
+2026/4/4 12:30	CW1004	MSA_Consulting_Amendment1.pdf	success	CW004-V1	CW004	Amendment No.1 to Master Consulting Agreement	Amendment	Variation Agreement
+2026/4/5 13:00	CW1005	UnknownDoc.pdf	success	CW005		Miscellaneous Contract Document	Miscellaneous	
