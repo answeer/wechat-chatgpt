@@ -398,3 +398,14 @@ timestamp	cw_id	file	status	Contract ID	Parent Contract ID	Document Title	Contra
 2026/4/4 12:25	CW1004	PowerOfAttorney_Consulting.pdf	success	CW004-POA	CW004	Power of Attorney - Consulting Agreement	Power of Attorney	Power of Attorney
 2026/4/4 12:30	CW1004	MSA_Consulting_Amendment1.pdf	success	CW004-V1	CW004	Amendment No.1 to Master Consulting Agreement	Amendment	Variation Agreement
 2026/4/5 13:00	CW1005	UnknownDoc.pdf	success	CW005		Miscellaneous Contract Document	Miscellaneous	
+
+
+
+MA-SA-(SV-MV) --> if there are more than one variation (either SV or MV) please get the latest start date.
+
+---------------
+
+IN the second level of precedence check if there are any precedence rule mentioned in the contract document itself.
+
+
+
